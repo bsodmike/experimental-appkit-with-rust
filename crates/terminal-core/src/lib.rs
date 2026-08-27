@@ -16,10 +16,12 @@
 
 pub mod cell;
 pub mod color;
+pub mod cursor;
 pub mod geometry;
 pub mod grid;
 
 pub use cell::{Cell, CellAttrs};
 pub use color::Color;
+pub use cursor::Cursor;
 pub use geometry::{Position, TerminalSize};
 pub use grid::Grid;
