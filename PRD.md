@@ -976,6 +976,56 @@ Resolving §17.3 changed three things that had been treated as closed:
 
 ---
 
+## 19. Development workflow
+
+This section describes *how* the engine is built, as distinct from *what* it is.
+It is placed last because it is process rather than contract, but it is not
+optional: the discipline here is what keeps the contract above trustworthy.
+
+**Engine-first, and headless.** All terminal semantics live in the
+`terminal-core` crate — pure Rust, no platform dependency, unit-testable without
+a Mac. This is the guiding principle restated operationally: if a new piece of
+work cannot be exercised by a `cargo test` on Linux, it has leaked across the
+boundary (§2, and the closing principle below) and belongs on the native side
+instead.
+
+**Small increments.** Build one cohesive primitive at a time — its types and its
+tests together — then check in. Decisions are expected to be revisited, so a
+smaller step is cheaper to unwind than a large one. Volume is never generated
+ahead of a working, tested foundation.
+
+**Load-bearing decisions are designed before they are coded.** Anything with wide
+blast radius — the buffer model (§16), threading (§7), the read path (§10) — is
+settled first, stress-tested by argument where it helps, and recorded in §17.
+These are chosen deliberately, not discovered midway through an implementation.
+
+**The per-increment verification loop.** Before any increment is committed, and
+in this order:
+
+1. `cargo fmt` — formatting is not a matter of taste to be re-litigated per file.
+2. `cargo clippy --all-targets` — treat every warning as a defect to fix, not to
+   silence.
+3. `cargo test` — the whole suite, every time.
+4. **Fix every issue** the three steps surface before proceeding. The tree stays
+   green and fmt-clean at every commit; a warning is never carried forward.
+
+**Summarise every change and learning back into this document.** The PRD is the
+single source of truth (§1), so each increment that changes a decision, adds a
+constraint, or teaches something non-obvious updates the affected section, records
+new decisions in §17, and notes any ripples. A design that lives only in a commit
+message or a conversation is a design that has already started to rot.
+
+**One commit per increment**, with a conventional message and a `Co-Authored-By`
+trailer, so the history reads as a sequence of self-contained, verified steps.
+
+**Crate layout.** `terminal-core` is the pure engine and the only crate today.
+The FFI layer — the `staticlib` plus the cbindgen-generated header of §14 —
+becomes a separate `terminal-ffi` crate when the boundary is first crossed, so
+that the engine crate never gains a build step or a dependency that would
+compromise its headless testability.
+
+---
+
 ## Guiding principle
 
 > A Rust terminal emulator with a native macOS frontend — not a macOS terminal

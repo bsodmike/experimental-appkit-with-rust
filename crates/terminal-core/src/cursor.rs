@@ -106,7 +106,10 @@ mod tests {
         c.arm_wrap();
         c.move_to(Position::new(5, 9));
         assert_eq!(c.position(), Position::new(5, 9));
-        assert!(!c.pending_wrap(), "moving the cursor disarms the deferred wrap");
+        assert!(
+            !c.pending_wrap(),
+            "moving the cursor disarms the deferred wrap"
+        );
     }
 
     #[test]
@@ -126,7 +129,10 @@ mod tests {
         c.arm_wrap();
         c.clamp_to(TerminalSize::new(24, 80));
         assert_eq!(c.position(), Position::new(23, 79));
-        assert!(!c.pending_wrap(), "clamping clears a wrap on a column that may be gone");
+        assert!(
+            !c.pending_wrap(),
+            "clamping clears a wrap on a column that may be gone"
+        );
     }
 
     #[test]
