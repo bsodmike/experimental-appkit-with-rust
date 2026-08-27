@@ -1,7 +1,8 @@
 # PRD: The Rust ↔ AppKit Boundary
 
-**Status:** design, pre-implementation. No code exists yet, and none should be
-written until the open decisions in §17 are resolved.
+**Status:** design complete, ready for implementation. Every decision in §17 —
+including the three formerly-open items in §17.3 — is now resolved, so code may
+be written against the contract below.
 
 **Companion documents:** `SPEC.md` describes *what the terminal does*. This
 document describes *how the two halves of the program talk to each other*. Where
@@ -338,15 +339,17 @@ whatever rate it can sustain.
 
 ### Shutdown
 
-Destroying a session must be ordered, or the reader thread outlives the memory it
-is writing into:
+Destroying a session must be ordered, or a background thread outlives the memory
+it is writing into. There are **two** such threads: the PTY reader (this section)
+and the scrollback-reflow maintenance thread (§16.5).
 
 1. Native calls `terminal_shutdown(handle)`.
-2. Rust signals the reader thread to stop and **joins it**.
+2. Rust signals **both** threads to stop and **joins both**.
 3. Only then may native call `terminal_destroy(handle)`.
 
-A single `terminal_destroy` that does both internally is acceptable and safer;
-what is not acceptable is a destroy that returns while a thread is still running.
+A single `terminal_destroy` that does all of this internally is acceptable and
+safer; what is not acceptable is a destroy that returns while either thread is
+still running.
 
 ---
 
@@ -391,6 +394,16 @@ through.
 The IME rule specifically: while composition is active, the view displays marked
 text itself and sends **nothing**. On commit, `insertText:` fires once and the
 committed text crosses as UTF-8.
+
+**Pointer input is a fourth channel, and it already exists in v1 for selection.**
+Because selection state lives in Rust (§5), the view reports pointer gestures —
+down / drag / up, at a cell, with button and modifiers — through
+`terminal_pointer_event`. In v1 the engine turns these into selection. When mouse
+reporting (§17, #15) is added post-MVP, the engine routes the *same* events to
+PTY-byte encoding instead, exactly as it already does for keys: the view reports
+what happened, Rust decides what it means. The one frontend rule to preserve now
+is that holding Shift (or Option) must force local selection even once an
+application has enabled mouse tracking.
 
 ---
 
@@ -780,8 +793,13 @@ knows about pixels and cells, the engine knows about text.
 
 Three pieces of state are anchored logically and recomputed after every reflow:
 
-1. **Selection.** Anchored at `(line_id, offset)` for both ends. Without this, a
-   resize leaves the highlight pointing at unrelated text.
+1. **Selection.** Anchored at `(line_id, offset)` for both ends so it stays glued
+   to its text across *scrolling* and *appended output*. Across a *width-change
+   reflow*, v1 **clears** the selection rather than recomputing its geometry
+   (§17, #14): the anchors exist regardless, but placing a rewrapped selection —
+   a select-all across deep history in particular — would force exactly the
+   synchronous reflow §16.5 exists to avoid. Surviving small selections is a
+   contained later upgrade, precisely because the anchors are already there.
 2. **Viewport position.** Anchored at "the top of the view is line `L`, wrap
    segment `S`" rather than "scrolled up N rows". Without this, resizing while
    scrolled back jumps you somewhere arbitrary — a bug users notice immediately.
@@ -840,11 +858,36 @@ The three mitigations compose:
 - **Cache wrap points per logical line**, invalidated on width change, so
   re-rendering at an unchanged width costs nothing.
 
-A note on sequencing: debouncing alone captures most of the win, and logical-line
-storage (§16.1) means lazy scrollback can be added later as a contained change to
-the index layer rather than a rewrite of how lines are stored. The two are being
-built together here because deep scrollback should stay cheap, not because
-retrofitting would be prohibitive.
+### 16.5 The reflow worker — the v1 mechanism
+
+The 100k scrollback ceiling (§17, #13) makes lazy scrollback reflow **v1-critical,
+not optional**: a full-buffer reflow at that depth is tens of milliseconds, far
+too much to run synchronously at gesture-end. So the three mitigations above are
+realised by a concrete worker.
+
+- **A dedicated Rust maintenance thread** owns background reflow — not the reader
+  thread (a busy PTY would starve it exactly when history grows fastest) and not
+  the main run-loop (that would leak engine work across the boundary, against §5).
+  It parks when caught up and is woken on a width change.
+- **Reflow is chunked and lock-bounded.** The worker takes the mutex, rewraps
+  about a screenful of logical lines, releases, and repeats. No single lock-hold
+  exceeds a frame budget, so it never stalls the reader thread or `drawRect:`.
+  *This chunking — not the eager/lazy split — is what actually makes resize
+  smooth;* an unchunked background pass janks just as hard as a synchronous one,
+  because it holds the one mutex too long.
+- **It always loses to interactive work.** Between chunks the worker sleeps
+  briefly, so the reader and main threads reliably win the (non-fair) mutex.
+  Background reflow of deep history therefore takes a second or two of wall-clock
+  to *complete* — which is invisible, because what is on screen was already
+  correct at gesture-end and never depended on the worker finishing.
+- **Width changes mid-gesture restart cheaply.** The worker re-reads an atomic
+  `target_width` at the top of each chunk; if it changed, it abandons and
+  restarts. The per-line wrap-point cache (mitigation three above, keyed by
+  width) turns the common back-and-forth — 80→120→80 — into cache hits rather
+  than recomputation.
+
+This worker is the second thread §7's shutdown sequence must signal and join
+before `terminal_destroy`.
 
 ---
 
@@ -871,7 +914,7 @@ scrollback is stored.
 | # | Decision | Resolution |
 |---|---|---|
 | 9 | Scrollback storage | **Logical lines**, with display rows as derived `(line_id, offset, len)` indices rather than owned copies (§16.1). Makes reflow a scan rather than a rebuild, and makes idempotent round-tripping across widths tractable. |
-| 10 | Reflow eagerness | **Viewport eagerly, scrollback lazily**, so cost is bounded by screen size rather than buffer depth and stays flat as history accumulates (§16.4). |
+| 10 | Reflow eagerness | **Viewport eagerly, scrollback lazily**, so cost is bounded by screen size rather than buffer depth and stays flat as history accumulates (§16.4). **v1-critical**, not deferrable — the 100k ceiling (#13) rules out an eager full-buffer reflow at gesture-end; realised by the maintenance worker in §16.5. |
 | 11 | Live-resize strategy | **Debounce across the gesture** via `inLiveResize`, deferring both full reflow and `SIGWINCH` to the end (§16.4). |
 | 12 | Line identity | **A monotonic counter**, never an array index — eviction would otherwise shift every index and silently invalidate stored anchors (§16.2). |
 
@@ -880,15 +923,33 @@ what makes lazy reflow and stable line ids straightforward, and debouncing is
 what makes the whole approach survive a live resize gesture. Answering them
 differently in isolation would produce a design that fights itself.
 
-### 17.3 Still genuinely open
+### 17.3 Opened as "genuinely open," now settled
 
-Not blocking, but worth settling before the relevant milestone:
+These three were left open in an earlier draft. All are now resolved.
 
-| # | Question | Notes |
+| # | Decision | Resolution |
 |---|---|---|
-| 13 | Scrollback depth limit | Drives whether §16.4's laziness is load-bearing or merely tidy. A configurable default in the 10k range is conventional. |
-| 14 | Does selection survive reflow, or get cleared? | Anchoring makes surviving *possible* (§16.3); whether it should is a product call. Clearing is defensible and much simpler. |
-| 15 | Mouse reporting mode | When an application enables mouse tracking, native gestures stop being selection and become bytes to the PTY. Affects the input split in §8. Post-MVP in `SPEC.md`, but the input design should not preclude it. |
+| 13 | Scrollback depth limit | **Bounded and configurable: default 10k lines, hard maximum 100k.** No "unlimited" in v1. The 100k ceiling is a deliberate, load-bearing choice — it is what makes lazy reflow (#10) v1-critical rather than optional (§16.5). Memory at the cap is ~20–100 MB depending on how coloured the history is. |
+| 14 | Does selection survive reflow? | **Cleared on width-change reflow in v1.** Logical anchors are kept regardless — scrolling, appended output and eviction all need them — so this is specifically the width-change case. Clearing avoids a surprise synchronous reflow (a select-all across 100k lines would otherwise hitch) and costs nothing; "survive small selections, guard the pathological case" is a contained later upgrade (§16.3). |
+| 15 | Mouse reporting mode | **Implementation is post-MVP, but the v1 input FFI is built to enable it.** Because selection state already lives in Rust (#5), the frontend already reports pointer gestures across the boundary. v1 uses the *general* shape — `terminal_pointer_event(phase, row, col, button, modifiers)` — so when mouse mode lands, the engine routes the *same* input to PTY-byte encoding instead of selection, mirroring key encoding (§8). A `TerminalEvent` variant for mode-change is reserved (free, per #8). Known frontend follow-ups: the Shift/Option-forces-local-selection override and a cursor-shape change. |
+
+The narrow alternative for #15 — `terminal_set_selection(start, end)` with the
+frontend tracking the drag — was rejected: it saves nothing meaningful in v1 and
+would force a second, parallel input path for mouse reporting later, because the
+button, phase and modifiers would never cross the boundary.
+
+### 17.4 Consequences that rippled back into "settled" sections
+
+Resolving §17.3 changed three things that had been treated as closed:
+
+- **#10 (reflow eagerness) is now v1-critical, not deferrable.** The 100k ceiling
+  (#13) removed the option of a single eager full-buffer reflow at gesture-end.
+  The concrete worker is specified in §16.5.
+- **§7 shutdown now signals and joins two threads** — the PTY reader *and* the
+  reflow maintenance thread — before `terminal_destroy`.
+- **The FFI input surface gains `terminal_pointer_event`** in the general shape
+  (#15), which becomes the single path for both selection (v1) and mouse
+  reporting (post-MVP).
 
 ---
 
