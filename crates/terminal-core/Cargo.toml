@@ -3,4 +3,10 @@ name = "terminal-core"
 version = "0.1.0"
 edition = "2024"
 
+# The pure, headless terminal engine (PRD §2). No FFI and no platform code lives
+# here — that is a separate crate — so this one stays testable without a Mac.
+[lib]
+name = "terminal_core"
+path = "src/lib.rs"
+
 [dependencies]

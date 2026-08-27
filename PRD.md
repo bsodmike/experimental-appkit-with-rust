@@ -4,10 +4,13 @@
 including the three formerly-open items in §17.3 — is now resolved, so code may
 be written against the contract below.
 
-**Companion documents:** `SPEC.md` describes *what the terminal does*. This
-document describes *how the two halves of the program talk to each other*. Where
-the two disagree, this document is the more considered one and wins; the
-disagreements are called out explicitly in §17.
+**Scope:** this document describes *how the two halves of the program talk to
+each other* — the Rust ↔ AppKit boundary. It was originally paired with a
+`SPEC.md` describing *what the terminal does*; that document has since been
+removed, so this PRD now stands alone as the single source of truth. A few
+sections below still refer to design sketches that lived in that spec — those
+references are retained as historical context for why a decision went the way it
+did, and each is resolved inline.
 
 ---
 
@@ -356,7 +359,7 @@ still running.
 ## 8. Path A — a keystroke travels down
 
 This is the flow that shows why the input boundary has *three* channels rather
-than one. `SPEC.md` §16 warns about this; here is the concrete reason.
+than one. Here is the concrete reason.
 
 ```
   physical key press
@@ -459,7 +462,7 @@ the bytes owed, rather than hiding them behind a getter nobody calls.
 
 This is the most important technical section in the document.
 
-The natural-looking API — the one `SPEC.md` §7 sketches — is:
+The natural-looking API — the one a first sketch reaches for — is:
 
 ```c
 const TerminalCell *terminal_get_cells(TerminalSession *s);   // ⚠ unsound
@@ -498,9 +501,9 @@ that fights `drawRect:`.
 
 ### What the copied data should look like
 
-`SPEC.md` §7 proposes one struct per cell with a single `uint32_t codepoint`.
-That contradicts §9 of the same document, which requires combining characters:
-one `u32` cannot hold `e` + U+0301, nor an emoji ZWJ sequence.
+An earlier sketch proposed one struct per cell with a single `uint32_t
+codepoint`. That cannot represent combining characters: one `u32` cannot hold
+`e` + U+0301, nor an emoji ZWJ sequence.
 
 **Recommendation: copy out *runs*, not cells.** A run is a span of consecutive
 cells sharing the same colours and attributes, described as a slice of a UTF-8
@@ -525,7 +528,8 @@ Three reasons this is better than a cell array:
    combining marks it is simply wrong — the mark needs to be shaped together
    with its base character.
 2. **It keeps Unicode assembly in Rust**, where the terminal semantics already
-   live, which is what lets the renderer stay "dumb" as §13 of `SPEC.md` requires.
+   live, which is what lets the renderer stay "dumb" — it draws what it is given
+   and owns no terminal semantics.
 3. **Far fewer items cross per frame** — a typical line is a handful of runs
    rather than 200 cells.
 
@@ -899,7 +903,7 @@ before `terminal_destroy`.
 |---|---|---|
 | 1 | Ownership / threading model | `Arc<Mutex<Emulator>>`, with the lock hidden behind the opaque handle. The native side sees a thread-safe API and no lock at all (§7). |
 | 2 | Read path across the FFI | Copy into a caller-owned, reused buffer, once per frame. Follows from #1: no pointer into Rust memory may outlive the lock (§10-A). |
-| 3 | Rendering data model | Runs over a UTF-8 buffer, not a cell array. Resolves the `SPEC.md` §7/§9 contradiction and matches how Core Text shapes text (§10). |
+| 3 | Rendering data model | Runs over a UTF-8 buffer, not a cell array. A per-cell `u32` codepoint cannot hold combining marks or ZWJ sequences; runs can, and they match how Core Text shapes text (§10). |
 | 4 | Native language | Objective-C++ for the bridge and `TerminalView` (§13). Reversible — the Rust side is identical either way. |
 | 5 | Viewport ownership | Rust. The engine owns scroll position alongside scrollback and selection, so all three stay consistent and the frontend speaks only display coordinates (§16.2). |
 | 6 | Reflow on resize | **Yes — wrapped lines reflow.** The consequential one: it dictates the buffer model and forces logical coordinates into existence (§16). |
