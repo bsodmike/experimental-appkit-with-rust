@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      The App Sandbox is OFF, deliberately, and this file exists to say so
+      rather than leave it a question (PRD-mac §11).
+
+      A sandboxed process's children inherit the sandbox, and there is no
+      entitlement that lets one out. The shell would be confined to the app's
+      container: no reading ~/projects, no writing a file, no git push. That is
+      why no terminal emulator ships sandboxed, and why the Mac App Store is out
+      of scope for this app.
+
+      Notarized direct distribution -- which is the target -- does not want the
+      sandbox, so nothing is lost by this.
+    -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+</dict>
+</plist>

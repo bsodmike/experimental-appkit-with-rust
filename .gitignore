@@ -1,2 +1,9 @@
 .DS_Store
 **/target
+
+# The Xcode project is generated from project.yml, and the build output
+# and local signing identity are yours alone.
+native/macos/*.xcodeproj/
+native/macos/build/
+native/macos/Local.xcconfig
+native/macos/Info.generated.plist

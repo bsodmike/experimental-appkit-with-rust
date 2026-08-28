@@ -321,7 +321,7 @@ needed.**
 
 **Decision: the bundle identifier is permanent from the first shipped build.** It
 keys preferences, keychain items and the TCC permission database; changing it
-later orphans all three. It is `com.inertialbox.grill` until someone says
+later orphans all three. It is `com.inertialbox.crustty` until someone says
 otherwise, and the README says to say so before the first signed release.
 
 **Decision: application state lives only in

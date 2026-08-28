@@ -1,0 +1,12 @@
+// Copy to Local.xcconfig (which is gitignored) when you have a Developer ID
+// certificate. Until then, nothing here is needed: `just build` and `just run`
+// sign ad-hoc and require no Apple account at all.
+//
+// Find your identity with:
+//     security find-identity -v -p codesigning
+//
+// SIGN_IDENTITY is the full string in quotes from that output; DEV_TEAM is the
+// ten-character team id in the parentheses at the end of it.
+
+CODE_SIGN_IDENTITY = Developer ID Application: Your Name (ABCDE12345)
+DEVELOPMENT_TEAM = ABCDE12345

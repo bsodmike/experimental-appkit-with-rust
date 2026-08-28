@@ -1,0 +1,157 @@
+# The Xcode project, as fifty lines you can read instead of a thousand you
+# cannot (PRD-mac §10). Generate it with `just xcode`; the .xcodeproj is a build
+# artifact and is not committed.
+
+name: Crustty
+
+options:
+  bundleIdPrefix: com.inertialbox
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+  # Nothing in this project is generated into the source tree.
+  defaultConfig: Debug
+
+configs:
+  Debug: debug
+  Release: release
+
+# Local signing identity, if there is one. Untracked; see Local.xcconfig.example.
+configFiles:
+  Debug: Local.xcconfig
+  Release: Local.xcconfig
+
+settings:
+  base:
+    PRODUCT_NAME: Crustty
+    PRODUCT_BUNDLE_IDENTIFIER: com.inertialbox.crustty
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+    # Build output next to the project rather than inside DerivedData, so that
+    # `just run` knows where the binary is (PRD §14, gotcha 5).
+    SYMROOT: $(SRCROOT)/build
+
+    CLANG_CXX_LANGUAGE_STANDARD: "c++17"
+    CLANG_CXX_LIBRARY: "libc++"
+    CLANG_ENABLE_OBJC_ARC: YES
+    GCC_WARN_ABOUT_RETURN_TYPE: YES
+    CLANG_WARN_DOCUMENTATION_COMMENTS: NO
+    WARNING_CFLAGS: [-Wall, -Wextra]
+
+    # The generated header, and the platform-free half of the frontend.
+    HEADER_SEARCH_PATHS:
+      - $(SRCROOT)/../../crates/terminal-ffi/include
+      - $(SRCROOT)/Glue
+
+    # Ad-hoc by default: `just build` and `just run` need no Apple account.
+    # Local.xcconfig overrides these when there is a certificate.
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_ENTITLEMENTS: $(SRCROOT)/Crustty.entitlements
+    DEVELOPMENT_TEAM: ""
+
+  configs:
+    Debug:
+      RUST_PROFILE: debug
+      RUST_LIB_DIR: $(SRCROOT)/../../target/debug
+      GCC_PREPROCESSOR_DEFINITIONS: [DEBUG=1, $(inherited)]
+      ONLY_ACTIVE_ARCH: YES
+      # Xcode adds get-task-allow to Debug builds, which is what lets the
+      # debugger attach. Hardened Runtime would take it away.
+      ENABLE_HARDENED_RUNTIME: NO
+    Release:
+      RUST_PROFILE: release
+      RUST_LIB_DIR: $(SRCROOT)/../../target/release
+      # On from the first Release build: notarization requires it, and if it
+      # were ever going to break spawning a shell we want to know now rather
+      # than on shipping day (PRD-mac §11).
+      ENABLE_HARDENED_RUNTIME: YES
+
+targets:
+  Crustty:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources
+      - path: Glue
+    info:
+      path: Info.generated.plist
+      properties:
+        CFBundleName: Crustty
+        CFBundleDisplayName: Crustty
+        CFBundlePackageType: APPL
+        LSApplicationCategoryType: public.app-category.developer-tools
+        NSHighResolutionCapable: true
+        NSPrincipalClass: NSApplication
+        # No main nib: the menu bar and window are built in code, so there is
+        # no Interface Builder file to keep in step with them.
+    settings:
+      base:
+        LIBRARY_SEARCH_PATHS: [$(RUST_LIB_DIR)]
+        OTHER_LDFLAGS:
+          - -lterminal_ffi
+          # What Rust's std pulls in on macOS. If the link fails with missing
+          # symbols, `just native-libs` prints the authoritative list
+          # (PRD §14, gotcha 4).
+          - -liconv
+          - -framework
+          - CoreFoundation
+          - -framework
+          - AppKit
+          - -framework
+          - CoreText
+          - -framework
+          - CoreGraphics
+    preBuildScripts:
+      - name: Build the Rust engine
+        basedOnDependencyAnalysis: true
+        # Xcode build phases do not run your login shell, so PATH has to be set
+        # explicitly or this is `cargo: command not found` (PRD §14, gotcha 1).
+        script: |
+          export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          cd "$SRCROOT/../.."
+          if [ "$RUST_PROFILE" = "release" ]; then
+            cargo build -p terminal-ffi --release
+          else
+            cargo build -p terminal-ffi
+          fi
+        inputFiles:
+          - $(SRCROOT)/../../crates/terminal-core/src/lib.rs
+          - $(SRCROOT)/../../crates/terminal-pty/src/lib.rs
+          - $(SRCROOT)/../../crates/terminal-ffi/src/lib.rs
+          - $(SRCROOT)/../../Cargo.lock
+        outputFiles:
+          - $(RUST_LIB_DIR)/libterminal_ffi.a
+          - $(SRCROOT)/../../crates/terminal-ffi/include/terminal.h
+
+  CrusttyTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/AppKitTests.mm
+      - path: Glue
+    dependencies:
+      - target: Crustty
+    settings:
+      base:
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/Crustty.app/Contents/MacOS/Crustty
+        BUNDLE_LOADER: $(TEST_HOST)
+        LIBRARY_SEARCH_PATHS: [$(RUST_LIB_DIR)]
+        OTHER_LDFLAGS: [-lterminal_ffi, -liconv, -framework, CoreFoundation]
+
+schemes:
+  Crustty:
+    build:
+      targets:
+        Crustty: all
+        CrusttyTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets: [CrusttyTests]
+    profile:
+      config: Release
+    archive:
+      config: Release

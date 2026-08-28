@@ -28,7 +28,7 @@ Terminal.app/
 
 Two consequences the terminal cares about:
 
-**The bundle identifier is the app's real name.** `com.inertialbox.grill` in
+**The bundle identifier is the app's real name.** `com.inertialbox.crustty` in
 `Info.plist` is what macOS uses to key preferences, keychain items and the
 permission database. The name on the icon is decoration; the identifier is
 identity, and changing it makes the system treat the app as a different one that
