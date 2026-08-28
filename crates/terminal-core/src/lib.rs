@@ -19,6 +19,7 @@ pub mod color;
 pub mod cursor;
 pub mod geometry;
 pub mod grid;
+pub mod logical_line;
 pub mod text;
 
 pub use cell::{Cell, CellAttrs};
@@ -26,3 +27,4 @@ pub use color::Color;
 pub use cursor::Cursor;
 pub use geometry::{Position, TerminalSize};
 pub use grid::Grid;
+pub use logical_line::{AttrRun, LineId, LogicalLine};

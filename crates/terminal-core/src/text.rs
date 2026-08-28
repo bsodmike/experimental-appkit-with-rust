@@ -27,6 +27,11 @@ pub fn graphemes(s: &str) -> impl Iterator<Item = &str> {
     UnicodeSegmentation::graphemes(s, true)
 }
 
+/// Like [`graphemes`], but yielding each cluster's starting byte offset too.
+pub fn grapheme_indices(s: &str) -> impl Iterator<Item = (usize, &str)> {
+    UnicodeSegmentation::grapheme_indices(s, true)
+}
+
 /// The column width of one grapheme cluster: 0 (zero-width), 1 (normal) or 2
 /// (wide). Combining marks contribute nothing because width is taken from the
 /// cluster's base; the emoji/flag rules override where `unicode-width`'s
