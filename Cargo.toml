@@ -1,0 +1,12 @@
+# The workspace root. `terminal-core` is the pure engine; `terminal-pty` is the
+# POSIX half that gives it something to talk to (PRD §5: the PTY and the shell
+# process are Rust's, but they are platform code, so they stay out of the engine
+# crate). The `terminal-ffi` staticlib joins them when the boundary is first
+# crossed (PRD §14, §19).
+[workspace]
+members = ["crates/terminal-core", "crates/terminal-pty"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
