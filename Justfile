@@ -31,8 +31,10 @@ doctor:
     fi
     for tool in cargo rustc just xcodegen xcodebuild watchexec; do
         if command -v "$tool" >/dev/null 2>&1; then
-            version=$("$tool" --version 2>&1 | head -1)
-            printf '%-14s %s\n' "$tool" "$version"
+            # The path matters as much as the version: two copies of a tool on
+            # PATH is a confusing afternoon, and this is where it shows up.
+            printf '%-14s %-28s %s\n' "$tool" "$("$tool" --version 2>&1 | head -1)" \
+                "$(command -v "$tool")"
         else
             printf '%-14s %s\n' "$tool" "MISSING -- run: just bootstrap"
         fi
@@ -42,15 +44,29 @@ doctor:
         printf '%-14s %s\n' "signing" "$(security find-identity -v -p codesigning 2>/dev/null | grep -c 'Developer ID Application') Developer ID identities"
     fi
 
-# Install the tools the Mac side needs.
+# Install the tools the Mac side needs, and only the ones that are missing.
+#
+# `just` is deliberately not in the list: if this recipe is running then just is
+# already installed, and brewing it again would put a second copy on PATH with
+# the winner decided by ordering. A cargo-installed just is just as good.
 bootstrap:
     #!/usr/bin/env sh
     set -eu
+    missing=""
+    for tool in xcodegen watchexec; do
+        command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+    done
+    if [ -z "$missing" ]; then
+        echo "everything is already installed"
+        exit 0
+    fi
     if ! command -v brew >/dev/null 2>&1; then
-        echo "Homebrew is not installed. See https://brew.sh" >&2
+        echo "Homebrew is not installed, and these are missing:$missing" >&2
+        echo "See https://brew.sh, or install them however you prefer." >&2
         exit 1
     fi
-    brew install just xcodegen watchexec
+    echo "installing:$missing"
+    brew install $missing
 
 # ---------------------------------------------------------------- rust
 
