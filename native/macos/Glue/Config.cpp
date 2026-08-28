@@ -53,21 +53,22 @@ bool parse_int(const std::string& value, long& out) {
     }
 }
 
-/// `palette = 9=#f14c4c`: an index, an equals sign, and a colour.
-bool parse_palette_entry(const std::string& value, int& index, Rgba& color) {
-    const std::size_t equals = value.find('=');
-    if (equals == std::string::npos) {
-        return false;
+/// The index in `palette-9`, or -1 when the key is not a palette key at all.
+/// -2 when it is meant to be one but the index is not a number from 0 to 255,
+/// which is worth telling the user about rather than calling the whole key
+/// unknown.
+constexpr const char* kPalettePrefix = "palette-";
+
+int palette_index(const std::string& key) {
+    const std::size_t prefix = std::char_traits<char>::length(kPalettePrefix);
+    if (key.size() <= prefix || key.compare(0, prefix, kPalettePrefix) != 0) {
+        return -1;
     }
     long parsed = 0;
-    if (!parse_int(value.substr(0, equals), parsed) || parsed < 0 || parsed > 255) {
-        return false;
+    if (!parse_int(key.substr(prefix), parsed) || parsed < 0 || parsed > 255) {
+        return -2;
     }
-    if (!parse_color(value.substr(equals + 1), color)) {
-        return false;
-    }
-    index = static_cast<int>(parsed);
-    return true;
+    return static_cast<int>(parsed);
 }
 
 }  // namespace
@@ -109,10 +110,16 @@ Config resolve(const ParsedFile& file, const char* env_shell) {
                 config.theme.cursor = color;
             }
         } else if (entry.key == "palette") {
-            int index = 0;
+            // Ghostty spells this `palette = 1=#ff6188`. This file does not, and
+            // someone pasting from a Ghostty config deserves better than being
+            // told the key is unknown.
+            complain(entry, "colours are set one key at a time, as 'palette-1 = #ff6188'");
+        } else if (palette_index(entry.key) == -2) {
+            complain(entry, "expected a palette index from 0 to 255");
+        } else if (const int index = palette_index(entry.key); index >= 0) {
             Rgba color{};
-            if (!parse_palette_entry(entry.value, index, color)) {
-                complain(entry, "expected 'N=#rrggbb' with N from 0 to 255");
+            if (!parse_color(entry.value, color)) {
+                complain(entry, "'" + entry.value + "' is not a colour like #ff6188");
             } else {
                 config.theme.palette[index] = color;
             }

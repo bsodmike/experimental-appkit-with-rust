@@ -460,27 +460,44 @@ TEST(the_theme_can_be_overridden_a_colour_at_a_time) {
               "what the file did not mention is unchanged");
 }
 
-TEST(palette_entries_are_set_one_repeated_key_at_a_time) {
-    const Config config = config_from("palette = 1=#ff5555\npalette = 9=#ff6e6e\n");
+TEST(palette_entries_are_one_key_each) {
+    const Config config = config_from("palette-1 = #ff5555\npalette-9 = #ff6e6e\n");
     CHECK(config.theme.palette[1] == (Rgba{0xff, 0x55, 0x55, 255}));
     CHECK(config.theme.palette[9] == (Rgba{0xff, 0x6e, 0x6e, 255}));
     CHECK(config.diagnostics.empty());
 }
 
+TEST(the_whole_palette_is_reachable) {
+    const Config config = config_from("palette-0 = #010203\npalette-255 = #0a0b0c\n");
+    CHECK(config.theme.palette[0] == (Rgba{0x01, 0x02, 0x03, 255}));
+    CHECK(config.theme.palette[255] == (Rgba{0x0a, 0x0b, 0x0c, 255}));
+    CHECK(config.diagnostics.empty());
+}
+
 TEST(a_bad_palette_entry_is_reported_and_the_rest_still_apply) {
     const Config config = config_from(
-        "palette = 1=#ff5555\n"
-        "palette = 900=#000000\n"
-        "palette = 2=notacolour\n"
-        "palette = nonsense\n"
-        "palette = 3=#00ff00\n");
+        "palette-1 = #ff5555\n"
+        "palette-900 = #000000\n"
+        "palette-2 = notacolour\n"
+        "palette- = #ffffff\n"
+        "palette-x = #ffffff\n"
+        "palette-3 = #00ff00\n");
     CHECK(config.theme.palette[1] == (Rgba{0xff, 0x55, 0x55, 255}));
     CHECK_MSG(config.theme.palette[3] == (Rgba{0x00, 0xff, 0x00, 255}),
               "a bad line must not stop the ones after it");
-    CHECK_EQ(config.diagnostics.size(), 3u);
+    CHECK_EQ(config.diagnostics.size(), 4u);
     CHECK_EQ(config.diagnostics[0].line, 2);
     CHECK_EQ(config.diagnostics[1].line, 3);
     CHECK_EQ(config.diagnostics[2].line, 4);
+    CHECK_EQ(config.diagnostics[3].line, 5);
+}
+
+TEST(the_ghostty_spelling_is_corrected_rather_than_called_unknown) {
+    // Ghostty writes `palette = 1=#ff6188`. Someone pasting from one deserves
+    // to be told the spelling here, not that the key does not exist.
+    const Config config = config_from("palette = 1=#ff6188\n");
+    CHECK_EQ(config.diagnostics.size(), 1u);
+    CHECK(config.diagnostics[0].message.find("palette-1") != std::string::npos);
 }
 
 TEST(an_unknown_setting_is_named_rather_than_ignored) {

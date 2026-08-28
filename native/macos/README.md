@@ -87,8 +87,8 @@ background = #2d2a2e
 foreground = #fcfcfa
 cursor-color = #ff6188
 
-palette = 1=#ff6188
-palette = 9=#ff6188
+palette-1 = #ff6188
+palette-9 = #ff6188
 
 shell = /opt/homebrew/bin/fish
 option-is-meta = true
