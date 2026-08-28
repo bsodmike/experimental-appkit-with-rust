@@ -20,6 +20,7 @@ pub mod cursor;
 pub mod geometry;
 pub mod grid;
 pub mod logical_line;
+pub mod screen;
 pub mod scrollback;
 pub mod text;
 
@@ -29,4 +30,5 @@ pub use cursor::Cursor;
 pub use geometry::{Position, TerminalSize};
 pub use grid::Grid;
 pub use logical_line::{AttrRun, LineId, LogicalLine};
+pub use screen::{Row, Screen};
 pub use scrollback::Scrollback;
