@@ -767,6 +767,14 @@ accumulated display width. The difference between "rebuild the buffer" and
 "recompute a small index" is the difference between reflow being expensive and
 reflow being cheap, and it is decided here, by the storage layout.
 
+**Refinement (see ADR 2026-08-27): this is the *scrollback* representation, not
+the live screen.** The primary screen where mutation happens is an owned,
+cell-addressable grid — so that cursor positioning, scroll regions and edits stay
+trivial — and `(line_id, offset, len)` is how *scrollback and reflow* address
+text, not how the active screen is stored. Scrollback logical lines are stored
+packed (UTF-8 text plus attribute runs), and rows convert into that packed form
+as they scroll off. §17.5 records the full set of storage decisions this implies.
+
 The alternate screen is the exception: **it never reflows.** A full-screen
 application owns its own layout and repaints completely on `SIGWINCH`, so
 rewrapping its contents would corrupt a display the application is about to
@@ -954,6 +962,28 @@ Resolving §17.3 changed three things that had been treated as closed:
 - **The FFI input surface gains `terminal_pointer_event`** in the general shape
   (#15), which becomes the single path for both selection (v1) and mouse
   reporting (post-MVP).
+
+### 17.5 Storage model, resolved
+
+Decision #9 said "logical lines with derived `(line_id, offset, len)` rows" but
+left the mutation model, representation and mechanics open. A grilling session
+resolved them; full rationale is in `docs/adrs/2026-08-27.adr-logical-line-buffer-model.md`.
+
+| # | Decision | Resolution |
+|---|---|---|
+| 16 | Mutation surface | **Hybrid.** The active screen is an owned, cell-addressable grid; scrollback is logical lines. `(line_id, offset, len)` is the scrollback/reflow representation, not the live screen's. Refines §16.1. |
+| 17 | Line identity lifecycle | **`line_id` born with the logical line**, tracked through the active grid (each row tagged with owning `line_id` + soft-`wrapped`), persisted into scrollback — so on-screen selection anchors survive reflow. |
+| 18 | Scrollback representation | **Packed UTF-8 text + attribute runs** (`{byte_start, byte_len, cols, fg, bg, attrs}`), immutable, converted from grid rows on eviction. Hits the low end of #13's budget and is already the §10 render-run shape. |
+| 19 | Active-grid cell content | **`compact_str::CompactString`**, not heap `String` — UTF-8, but no per-cell allocation for real clusters. Reverses the earlier `String` choice. |
+| 20 | Internal offset unit | **Byte offsets into the packed UTF-8, grapheme-aligned**, for both triples and anchors; §16.2's `char_offset` becomes a byte offset. Columns are computed on demand, never stored. |
+| 21 | Primary-buffer type | **A dedicated `Screen` type** (row-oriented, per-row `line_id`/`wrapped`, owns cursor + scrollback). The dumb `Grid` stays the alternate-screen / scratch rectangle. |
+| 22 | Scrollback cap | **Dual: logical-line count (default 10k, max 100k) + total-bytes safety cap.** Whole oldest lines evicted from a `VecDeque`; never split or truncated. A count cap alone is not a memory bound because a logical line is unbounded. |
+| 23 | Wrap-point cache | **Per-line `{width, row_starts}`, `row_starts` stored inline**, invalidated by comparison to a single global width (O(1) resize), filled lazily + by the §16.5 thread, scrollback only. This is the concrete lazy-reflow mechanism. |
+| 24 | Boundary straddle | **Allow split, rejoin by `line_id`.** Rows freeze incrementally as they scroll off (active grid stays a clean rectangle); at most one line is split head/tail and reconstructed by concatenation at reflow. Frozen head byte-length tracked for split-line anchors. |
+| 25 | Grapheme width authority | **`unicode-width` + `unicode-segmentation` behind one shared `grapheme_width` / segmenter.** The write path and reflow scan must agree or the display desyncs; single-source-of-truth is the correctness invariant. Ambiguous width = 1, configurable post-MVP. |
+
+New dependencies this introduces: `compact_str`, `unicode-width`,
+`unicode-segmentation`.
 
 ---
 
