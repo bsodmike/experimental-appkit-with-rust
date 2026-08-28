@@ -93,6 +93,12 @@ impl Row {
     pub fn width(&self) -> u16 {
         self.cells.len() as u16
     }
+
+    /// Clip or pad the row to `cols`, without reflowing: cells past the new
+    /// width are dropped and new columns are blank.
+    pub fn resize_width(&mut self, cols: u16) {
+        self.cells.resize(cols as usize, Cell::blank());
+    }
 }
 
 /// The primary screen: active rows, cursor, scrollback and the current pen.
@@ -125,6 +131,23 @@ pub struct Screen {
     /// The DECSC stash. `None` until something is saved; a restore with nothing
     /// saved homes the cursor and resets the pen (VT100).
     saved: Option<SavedCursor>,
+    /// The primary buffer, set aside while the alternate screen is showing.
+    /// `Some` exactly when the alternate screen is active.
+    stashed_primary: Option<Buffer>,
+}
+
+/// Everything that is per-buffer rather than per-terminal: the rows, where the
+/// cursor is in them, the margins, and the half-frozen logical line at the top.
+///
+/// Modes, the pen, the title and pending replies are deliberately *not* here.
+/// They belong to the terminal, and survive a switch between buffers.
+#[derive(Clone, Debug)]
+struct Buffer {
+    rows: VecDeque<Row>,
+    cursor: Cursor,
+    scroll_top: u16,
+    scroll_bottom: u16,
+    pending: Option<LogicalLine>,
 }
 
 /// The terminal modes the engine keeps (PRD §5: what the keyboard sends and how
@@ -191,6 +214,7 @@ impl Screen {
             scroll_top: 0,
             scroll_bottom: size.rows.saturating_sub(1),
             modes: Modes::default(),
+            stashed_primary: None,
             title: String::new(),
             replies: Vec::new(),
             saved: None,
@@ -425,6 +449,38 @@ impl Screen {
         }
     }
 
+    /// Whether the alternate screen is showing.
+    pub fn is_alternate(&self) -> bool {
+        self.stashed_primary.is_some()
+    }
+
+    /// Swap `buffer` in and return what was showing.
+    fn swap_buffer(&mut self, buffer: Buffer) -> Buffer {
+        Buffer {
+            rows: std::mem::replace(&mut self.rows, buffer.rows),
+            cursor: std::mem::replace(&mut self.cursor, buffer.cursor),
+            scroll_top: std::mem::replace(&mut self.scroll_top, buffer.scroll_top),
+            scroll_bottom: std::mem::replace(&mut self.scroll_bottom, buffer.scroll_bottom),
+            pending: std::mem::replace(&mut self.pending, buffer.pending),
+        }
+    }
+
+    /// A blank buffer of the current size: what the alternate screen starts as.
+    fn blank_buffer(&mut self) -> Buffer {
+        let mut rows = VecDeque::with_capacity(self.size.rows as usize);
+        for _ in 0..self.size.rows {
+            let id = self.alloc_line_id();
+            rows.push_back(Row::blank(self.size.cols, id));
+        }
+        Buffer {
+            rows,
+            cursor: Cursor::new(),
+            scroll_top: 0,
+            scroll_bottom: self.size.rows.saturating_sub(1),
+            pending: None,
+        }
+    }
+
     /// Whether the scrolling region covers the whole screen, which is the only
     /// case in which scrolled-off rows join scrollback.
     ///
@@ -462,7 +518,9 @@ impl Screen {
         if top > bottom || bottom >= self.rows.len() {
             return;
         }
-        let whole = self.region_is_whole_screen();
+        // The alternate screen has no history: it is a scratch rectangle a
+        // full-screen program owns for as long as it runs.
+        let whole = self.region_is_whole_screen() && !self.is_alternate();
         if let Some(row) = self.rows.remove(top)
             && whole
         {
@@ -573,6 +631,19 @@ impl Screen {
         if new_size == self.size {
             return;
         }
+        if let Some(primary) = self.stashed_primary.take() {
+            // The alternate screen does not reflow — it has no logical lines to
+            // reflow, only a rectangle its program will redraw. The primary
+            // buffer underneath it still must, or returning to the shell would
+            // show a screen laid out for the old width, so it is swapped back
+            // in, reflowed by the normal path, and set aside again.
+            let alt = self.swap_buffer(primary);
+            self.resize(new_size);
+            let primary = self.swap_buffer(alt);
+            self.stashed_primary = Some(primary);
+            self.clip_rows_to_size();
+            return;
+        }
         if new_size.is_empty() {
             self.resize_to_empty(new_size);
             return;
@@ -637,6 +708,25 @@ impl Screen {
         if arm {
             self.cursor.arm_wrap();
         }
+    }
+
+    /// Re-lay the current rows to `self.size` by clipping and padding, with no
+    /// reflow. This is how the alternate screen resizes: its content belongs to
+    /// a program that will redraw, and rewrapping it would only invent lines
+    /// that program never wrote.
+    fn clip_rows_to_size(&mut self) {
+        let rows = self.size.rows as usize;
+        self.rows.truncate(rows);
+        for row in &mut self.rows {
+            row.resize_width(self.size.cols);
+        }
+        while self.rows.len() < rows {
+            let id = self.alloc_line_id();
+            self.rows.push_back(Row::blank(self.size.cols, id));
+        }
+        self.scroll_top = 0;
+        self.scroll_bottom = self.size.rows.saturating_sub(1);
+        self.cursor.clamp_to(self.size);
     }
 
     /// Degenerate resize to a zero-sized screen: preserve content by freezing all
@@ -876,6 +966,29 @@ impl Screen {
         }
     }
 
+    /// Switch to the alternate screen: a blank buffer with no scrollback, for a
+    /// full-screen program that must give the shell's output back untouched
+    /// when it exits.
+    ///
+    /// The primary buffer is set aside whole — rows, cursor and margins — so
+    /// returning is a swap, not a redraw. Nothing happens if it is already
+    /// showing.
+    pub fn enter_alternate(&mut self) {
+        if self.is_alternate() {
+            return;
+        }
+        let blank = self.blank_buffer();
+        let primary = self.swap_buffer(blank);
+        self.stashed_primary = Some(primary);
+    }
+
+    /// Switch back to the primary buffer, discarding the alternate screen.
+    pub fn exit_alternate(&mut self) {
+        if let Some(primary) = self.stashed_primary.take() {
+            self.swap_buffer(primary);
+        }
+    }
+
     /// DECSC: stash the cursor, its deferred wrap and the pen.
     pub fn save_cursor(&mut self) {
         self.saved = Some(SavedCursor {
@@ -909,6 +1022,13 @@ impl Screen {
             Mode::AutoWrap => self.modes.autowrap = enabled,
             Mode::CursorVisible => self.modes.cursor_visible = enabled,
             Mode::BracketedPaste => self.modes.bracketed_paste = enabled,
+            Mode::AlternateScreen => {
+                if enabled {
+                    self.enter_alternate();
+                } else {
+                    self.exit_alternate();
+                }
+            }
         }
     }
 
@@ -918,6 +1038,7 @@ impl Screen {
     /// Scrollback survives. A program resetting the terminal is claiming the
     /// screen, not erasing the user's history.
     pub fn reset(&mut self) {
+        self.exit_alternate();
         self.pen = Pen::default();
         self.modes = Modes::default();
         self.saved = None;
@@ -1827,6 +1948,129 @@ mod tests {
         let mut p = VtParser::new();
         s.advance(&mut p, b"\x1b]2;kept\x07\x1bc");
         assert_eq!(s.title(), "kept");
+    }
+
+    #[test]
+    fn the_alternate_screen_hides_the_primary_and_gives_it_back() {
+        let mut s = numbered(3, 8);
+        s.cursor_to(1, 4);
+        let mut p = VtParser::new();
+        s.advance(&mut p, b"\x1b[?1049h");
+        assert!(s.is_alternate());
+        assert_eq!(
+            rows_str(&s),
+            ["", "", ""],
+            "the alternate screen starts blank"
+        );
+        assert_eq!(s.cursor().position(), Position::new(0, 0));
+
+        s.print("full-screen");
+        s.advance(&mut p, b"\x1b[?1049l");
+        assert!(!s.is_alternate());
+        assert_eq!(
+            rows_str(&s),
+            ["r0", "r1", "r2"],
+            "the shell's output is untouched"
+        );
+        assert_eq!(
+            s.cursor().position(),
+            Position::new(1, 4),
+            "and so is the cursor"
+        );
+    }
+
+    #[test]
+    fn the_alternate_screen_keeps_no_history() {
+        let mut s = Screen::new(TerminalSize::new(2, 8));
+        let mut p = VtParser::new();
+        s.advance(&mut p, b"\x1b[?1049h");
+        for _ in 0..10 {
+            s.print("x");
+            s.next_line();
+        }
+        assert!(s.scrollback().is_empty());
+        assert!(s.pending_head().is_none());
+    }
+
+    #[test]
+    fn history_written_before_the_switch_survives_it() {
+        let mut s = numbered(2, 8);
+        s.cursor_to(1, 0);
+        s.line_feed(); // r0 into scrollback
+        let mut p = VtParser::new();
+        s.advance(&mut p, b"\x1b[?1049h");
+        assert_eq!(
+            s.scrollback().len(),
+            1,
+            "scrollback is the terminal's, not the buffer's"
+        );
+        s.advance(&mut p, b"\x1b[?1049l");
+        assert_eq!(s.scrollback().len(), 1);
+    }
+
+    #[test]
+    fn terminal_state_is_shared_across_the_switch() {
+        // The pen, the modes and the title belong to the terminal; only rows,
+        // cursor and margins belong to a buffer.
+        let mut s = Screen::new(TerminalSize::new(3, 8));
+        let mut p = VtParser::new();
+        s.advance(&mut p, b"\x1b[31m\x1b]2;title\x07\x1b[?7l\x1b[?1049h");
+        assert_eq!(s.pen().fg, Color::RED);
+        assert_eq!(s.title(), "title");
+        assert!(!s.modes().autowrap);
+    }
+
+    #[test]
+    fn switching_twice_does_not_stack() {
+        let mut s = numbered(2, 8);
+        let mut p = VtParser::new();
+        s.advance(&mut p, b"\x1b[?1049h");
+        s.print("alt");
+        s.advance(&mut p, b"\x1b[?1049h");
+        assert_eq!(
+            row_str(&s, 0),
+            "alt",
+            "a second switch is not a second buffer"
+        );
+        s.advance(&mut p, b"\x1b[?1049l\x1b[?1049l");
+        assert_eq!(rows_str(&s), ["r0", "r1"]);
+    }
+
+    #[test]
+    fn a_resize_clips_the_alternate_screen_and_reflows_the_primary_beneath() {
+        let mut s = Screen::new(TerminalSize::new(3, 6));
+        s.print("abcdefgh"); // wraps onto row 1 at width 6
+        let mut p = VtParser::new();
+        s.advance(&mut p, b"\x1b[?1049h");
+        s.print("alt text");
+
+        s.resize(TerminalSize::new(3, 4));
+        // At width 6 the alt rows read "alt te" / "xt"; clipping to 4 drops the
+        // "te" rather than pulling the "xt" back up, which a reflow would do.
+        assert_eq!(row_str(&s, 0), "alt");
+        assert_eq!(row_str(&s, 1), "xt");
+        assert!(s.rows().all(|r| r.width() == 4));
+
+        s.advance(&mut p, b"\x1b[?1049l");
+        assert_eq!(
+            row_str(&s, 0),
+            "abcd",
+            "the primary reflowed to the new width"
+        );
+        assert_eq!(row_str(&s, 1), "efgh");
+    }
+
+    #[test]
+    fn a_reset_comes_back_from_the_alternate_screen() {
+        let mut s = numbered(2, 8);
+        let mut p = VtParser::new();
+        s.advance(&mut p, b"\x1b[?1049h\x1bc");
+        assert!(!s.is_alternate());
+        assert_eq!(
+            rows_str(&s),
+            ["", ""],
+            "RIS still clears what it comes back to"
+        );
     }
 
     #[test]

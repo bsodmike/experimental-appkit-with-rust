@@ -116,6 +116,8 @@ pub enum Mode {
     CursorVisible,
     /// `?2004`: pasted text is bracketed with `CSI 200~` / `CSI 201~`.
     BracketedPaste,
+    /// `?1049` (and the older `?47` / `?1047`): show the alternate screen.
+    AlternateScreen,
 }
 
 /// The region an erase command clears, relative to the cursor.
@@ -405,6 +407,9 @@ fn private_mode(n: u16) -> Option<Mode> {
         1 => Some(Mode::ApplicationCursorKeys),
         7 => Some(Mode::AutoWrap),
         25 => Some(Mode::CursorVisible),
+        // 1049 also saves and restores the cursor, which falls out of setting
+        // the whole primary buffer aside and swapping it back.
+        47 | 1047 | 1049 => Some(Mode::AlternateScreen),
         2004 => Some(Mode::BracketedPaste),
         _ => None,
     }
@@ -630,13 +635,28 @@ mod tests {
         assert_eq!(feed(input), vec![Command::SetModes { modes, enabled }]);
     }
 
+    #[rstest]
+    #[case(b"\x1b[?1049h", true)]
+    #[case(b"\x1b[?1047h", true)]
+    #[case(b"\x1b[?47h", true)]
+    #[case(b"\x1b[?1049l", false)]
+    fn the_alternate_screen_has_three_spellings(#[case] input: &[u8], #[case] enabled: bool) {
+        assert_eq!(
+            feed(input),
+            vec![Command::SetModes {
+                modes: vec![Mode::AlternateScreen],
+                enabled,
+            }]
+        );
+    }
+
     #[test]
     fn unknown_modes_are_dropped_and_known_ones_kept() {
-        // `?1049` (the alternate screen) is not handled yet, so it vanishes
-        // rather than being reported as something the engine acted on.
-        assert_eq!(feed(b"\x1b[?1049h"), vec![]);
+        // `?1048` (save the cursor only) is not handled, so it vanishes rather
+        // than being reported as something the engine acted on.
+        assert_eq!(feed(b"\x1b[?1048h"), vec![]);
         assert_eq!(
-            feed(b"\x1b[?1049;25h"),
+            feed(b"\x1b[?1048;25h"),
             vec![Command::SetModes {
                 modes: vec![Mode::CursorVisible],
                 enabled: true,
