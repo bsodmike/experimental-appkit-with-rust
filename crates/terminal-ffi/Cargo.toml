@@ -1,0 +1,19 @@
+[package]
+name = "terminal-ffi"
+version.workspace = true
+edition.workspace = true
+
+# The waist of the hourglass (PRD §2): the only crate that speaks C. It builds
+# as a staticlib for Xcode to link, and as an ordinary lib so the boundary can
+# be tested from Rust without a Mac.
+[lib]
+name = "terminal_ffi"
+path = "src/lib.rs"
+crate-type = ["staticlib", "lib"]
+
+[dependencies]
+terminal-core = { path = "../terminal-core" }
+terminal-pty = { path = "../terminal-pty" }
+
+[build-dependencies]
+cbindgen = "0.29"

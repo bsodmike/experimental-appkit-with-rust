@@ -4,7 +4,7 @@
 # crate). The `terminal-ffi` staticlib joins them when the boundary is first
 # crossed (PRD §14, §19).
 [workspace]
-members = ["crates/terminal-core", "crates/terminal-pty"]
+members = ["crates/terminal-core", "crates/terminal-ffi", "crates/terminal-pty"]
 resolver = "3"
 
 [workspace.package]
