@@ -1,7 +1,7 @@
 //! The primary screen: the mutable active grid plus its scrollback.
 //!
 //! PRD §17.5 #21: a dedicated type for the primary buffer, distinct from the
-//! dumb [`Grid`](crate::grid::Grid) that backs the alternate screen. The active
+//! dumb [`Grid`](crate::prelude::Grid) that backs the alternate screen. The active
 //! grid is the mutation surface where the cursor writes and scroll regions
 //! operate (the hybrid model, #16); each row carries the identity of the logical
 //! line it belongs to (#17) so on-screen anchors survive reflow, and scrollback

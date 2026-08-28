@@ -29,7 +29,7 @@ pub struct Scrollback {
 }
 
 impl Scrollback {
-    /// A scrollback bounded by `max_lines` (clamped to [`HARD_MAX_LINES`]) and
+    /// A scrollback bounded by `max_lines` (clamped to `HARD_MAX_LINES`) and
     /// `max_bytes`.
     pub fn new(max_lines: usize, max_bytes: usize) -> Self {
         Self {

@@ -10,25 +10,35 @@
 //! is therefore pure Rust with no platform dependency, and everything is
 //! unit-testable headlessly.
 //!
-//! This module tree currently holds only the foundational value types. The
-//! buffer model (logical lines, reflow), the VT parser, the PTY and the FFI
-//! surface are built on top of these in later increments.
+//! The public API is the [`prelude`] and nothing else: the implementation
+//! modules are private, so their internal layout can change without breaking
+//! consumers (see `docs/adrs/2026-08-28.adr-private-modules-and-prelude.md`).
+//! The buffer model (logical lines, reflow), the VT parser, the PTY and the FFI
+//! surface build on top of these modules.
 
-pub mod cell;
-pub mod color;
-pub mod cursor;
-pub mod geometry;
-pub mod grid;
-pub mod logical_line;
-pub mod screen;
-pub mod scrollback;
-pub mod text;
+mod cell;
+mod color;
+mod cursor;
+mod geometry;
+mod grid;
+mod logical_line;
+mod screen;
+mod scrollback;
+mod text;
 
-pub use cell::{Cell, CellAttrs};
-pub use color::Color;
-pub use cursor::Cursor;
-pub use geometry::{Position, TerminalSize};
-pub use grid::Grid;
-pub use logical_line::{AttrRun, LineId, LogicalLine};
-pub use screen::{Row, Screen};
-pub use scrollback::Scrollback;
+/// The crate's public surface. Import it with `use terminal_core::prelude::*;`.
+///
+/// Every type the engine exposes is re-exported here and nowhere else. Keeping
+/// the implementation modules private means their internals — field layouts,
+/// helper functions, module boundaries — can be refactored freely without
+/// changing what consumers depend on.
+pub mod prelude {
+    pub use crate::cell::{Cell, CellAttrs};
+    pub use crate::color::Color;
+    pub use crate::cursor::Cursor;
+    pub use crate::geometry::{Position, TerminalSize};
+    pub use crate::grid::Grid;
+    pub use crate::logical_line::{AttrRun, LineId, LogicalLine};
+    pub use crate::screen::{Pen, Row, Screen};
+    pub use crate::scrollback::Scrollback;
+}
