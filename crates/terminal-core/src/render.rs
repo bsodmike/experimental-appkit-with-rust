@@ -209,7 +209,38 @@ fn build_row(row: u16, cells: &[Cell], text: &mut String, runs: &mut Vec<Run>) {
     // lets a later cell restyle the run instead of starting a new one.
     let mut all_blank = true;
 
-    for (col, cell) in cells[..=last].iter().enumerate() {
+    let mut col = 0usize;
+    while col <= last {
+        let cell = &cells[col];
+
+        // A double-width cluster is a run of its own, never merged with its
+        // neighbours. The frontend positions glyphs by column, and it can only
+        // map a glyph back to a column by counting clusters — which works only
+        // while every cluster in a run is one column wide. Splitting here is
+        // what lets the renderer stay dumb about character widths (PRD §10).
+        if is_wide_base(cells, col) {
+            if let Some(run) = current.take() {
+                runs.push(run);
+            }
+            let mut wide = Run {
+                utf8_offset: text.len() as u32,
+                utf8_len: cell.content.len() as u32,
+                fg: cell.fg.pack(),
+                bg: cell.bg.pack(),
+                row,
+                col: col as u16,
+                cols: 2,
+                attrs: cell.attrs.bits(),
+            };
+            text.push_str(&cell.content);
+            // The spacer contributes its column and no bytes.
+            wide.utf8_len = cell.content.len() as u32;
+            runs.push(wide);
+            all_blank = true;
+            col += 2;
+            continue;
+        }
+
         let blank = cell.is_blank();
         match current.as_mut() {
             // A blank cell extends the run when the run's own style would draw
@@ -244,17 +275,26 @@ fn build_row(row: u16, cells: &[Cell], text: &mut String, runs: &mut Vec<Run>) {
         }
 
         let run = current.as_mut().expect("a run was just started");
-        // The spacer column of a wide grapheme has empty content: it adds a
-        // column and no bytes.
         text.push_str(&cell.content);
         run.utf8_len += cell.content.len() as u32;
         run.cols += 1;
         all_blank &= blank;
+        col += 1;
     }
 
     if let Some(run) = current {
         runs.push(run);
     }
+}
+
+/// Whether the cell at `col` is the first column of a double-width cluster:
+/// content of its own, followed by the empty-content spacer the write path
+/// leaves in the second column.
+fn is_wide_base(cells: &[Cell], col: usize) -> bool {
+    !cells[col].content.is_empty()
+        && cells
+            .get(col + 1)
+            .is_some_and(|next| next.content.is_empty())
 }
 
 #[cfg(test)]
@@ -358,18 +398,52 @@ mod tests {
     }
 
     #[test]
-    fn a_wide_grapheme_covers_two_columns_with_one_glyph() {
+    fn a_wide_grapheme_is_a_run_of_its_own() {
+        // The frontend maps a glyph back to its column by counting clusters,
+        // which only works while every cluster in a run is one column wide. So
+        // a double-width cluster is never merged with its neighbours.
         let mut s = screen(1, 10);
         s.print("a漢b");
         let frame = s.render();
-        assert_eq!(frame.runs().len(), 1);
-        let run = frame.runs()[0];
-        assert_eq!(run.cols, 4, "the wide grapheme occupies two columns");
+        assert_eq!(frame.runs().len(), 3);
+
+        let [before, wide, after] = [frame.runs()[0], frame.runs()[1], frame.runs()[2]];
+        assert_eq!((before.col, before.cols), (0, 1));
+        assert_eq!(frame.run_text(&before), "a");
+        assert_eq!((wide.col, wide.cols), (1, 2), "two columns for one cluster");
         assert_eq!(
-            frame.run_text(&run),
-            "a漢b",
+            frame.run_text(&wide),
+            "漢",
             "the spacer contributes no bytes"
         );
+        assert_eq!((after.col, after.cols), (3, 1));
+        assert_eq!(frame.run_text(&after), "b");
+
+        assert_eq!(frame.row_text(0), "a漢b", "the row still reads whole");
+    }
+
+    #[test]
+    fn a_wide_grapheme_keeps_the_style_of_the_cell_it_came_from() {
+        let mut s = screen(1, 10);
+        s.pen_mut().fg = Color::RED;
+        s.pen_mut().attrs.insert(CellAttrs::BOLD);
+        s.print("漢");
+        let frame = s.render();
+        let wide = frame.runs()[0];
+        assert_eq!(wide.fg, Color::RED.pack());
+        assert_eq!(wide.attrs, CellAttrs::BOLD.bits());
+        assert_eq!(wide.cols, 2);
+    }
+
+    #[test]
+    fn adjacent_wide_graphemes_stay_separate() {
+        let mut s = screen(1, 10);
+        s.print("漢字");
+        let frame = s.render();
+        assert_eq!(frame.runs().len(), 2);
+        assert_eq!(frame.runs()[0].col, 0);
+        assert_eq!(frame.runs()[1].col, 2);
+        assert!(frame.runs().iter().all(|r| r.cols == 2));
     }
 
     #[test]

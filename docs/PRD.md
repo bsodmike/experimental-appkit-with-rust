@@ -529,9 +529,13 @@ An earlier sketch proposed one struct per cell with a single `uint32_t
 codepoint`. That cannot represent combining characters: one `u32` cannot hold
 `e` + U+0301, nor an emoji ZWJ sequence.
 
-**Recommendation: copy out *runs*, not cells.** A run is a span of consecutive
-cells sharing the same colours and attributes, described as a slice of a UTF-8
-buffer:
+**Recommendation: copy out *runs*, not cells.** A run never mixes a double-width
+cluster with its neighbours, so the renderer can map a glyph back to its column
+by counting clusters rather than by knowing character widths (see the
+render-frame ADR).
+
+A run is a span of consecutive cells sharing the same colours and
+attributes, described as a slice of a UTF-8 buffer:
 
 ```rust
 #[repr(C)]
