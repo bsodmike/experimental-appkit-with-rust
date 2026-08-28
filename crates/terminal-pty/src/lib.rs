@@ -15,6 +15,8 @@
 
 mod interrupt;
 mod pty;
+mod terminal;
 
 pub use interrupt::Interrupt;
-pub use pty::Pty;
+pub use pty::{Pty, PtyHandle};
+pub use terminal::Terminal;

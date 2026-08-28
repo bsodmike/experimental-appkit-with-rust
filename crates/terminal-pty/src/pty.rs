@@ -12,7 +12,7 @@ use crate::interrupt::Interrupt;
 /// Dropping a `Pty` closes the descriptor but does *not* wait for the child;
 /// see [`Pty::shutdown`] for the ordered version PRD §7 asks for.
 pub struct Pty {
-    pty: pty_process::blocking::Pty,
+    handle: PtyHandle,
     child: Child,
 }
 
@@ -25,26 +25,30 @@ impl std::fmt::Debug for Pty {
     }
 }
 
-impl Pty {
-    /// Spawn `program` with `args` on a new pty of `size`.
-    ///
-    /// The child becomes the leader of its own session with the pty as its
-    /// controlling terminal, which is what makes job control, `Ctrl+C` and
-    /// `isatty()` behave the way a shell expects.
-    pub fn spawn<S: AsRef<std::ffi::OsStr>>(
-        program: S,
-        args: &[S],
-        size: TerminalSize,
-    ) -> io::Result<Self> {
-        let (pty, pts) = pty_process::blocking::open().map_err(io::Error::other)?;
-        // Set the size before the child starts, so it never sees the 0x0 that a
-        // fresh pty reports and lays itself out for a screen that never was.
-        pty.resize(to_pty_size(size)).map_err(io::Error::other)?;
-        let child = pty_process::blocking::Command::new(program)
-            .args(args.iter())
-            .spawn(pts)
-            .map_err(io::Error::other)?;
-        Ok(Self { pty, child })
+/// A handle to a pty descriptor, with no claim on the child process.
+///
+/// [`Pty::try_clone_handle`] makes a second one for the reader thread. Both
+/// refer to the same open file description, so a write on one and a blocking
+/// read on the other never wait for each other — which they would if the reader
+/// thread held a lock over the descriptor while parked in `poll`.
+pub struct PtyHandle(pty_process::blocking::Pty);
+
+impl std::fmt::Debug for PtyHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use std::os::fd::AsRawFd;
+        f.debug_struct("PtyHandle")
+            .field("fd", &self.0.as_raw_fd())
+            .finish()
+    }
+}
+
+impl PtyHandle {
+    /// Another handle to the same descriptor.
+    pub fn try_clone(&self) -> io::Result<Self> {
+        use std::os::fd::AsFd;
+        let fd = self.0.as_fd().try_clone_to_owned()?;
+        // Safety: the descriptor is a live pty master, duplicated just above.
+        Ok(Self(unsafe { pty_process::blocking::Pty::from_fd(fd) }))
     }
 
     /// Read output from the child. `Ok(0)` means the far end has gone.
@@ -53,7 +57,7 @@ impl Pty {
     /// a clean end-of-file. That is this API's end-of-file, and translating it
     /// here keeps the distinction out of every caller.
     pub fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self.pty.read(buf) {
+        match self.0.read(buf) {
             Err(e) if is_hangup(&e) => Ok(0),
             other => other,
         }
@@ -74,7 +78,7 @@ impl Pty {
         loop {
             let interrupt_fd = interrupt.as_fd();
             let mut fds = [
-                PollFd::new(&self.pty, PollFlags::IN),
+                PollFd::new(&self.0, PollFlags::IN),
                 PollFd::new(&interrupt_fd, PollFlags::IN),
             ];
             match poll(&mut fds, None) {
@@ -99,13 +103,68 @@ impl Pty {
 
     /// Send input to the child.
     pub fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.pty.write_all(bytes)
+        self.0.write_all(bytes)
     }
 
     /// Tell the kernel the window size, which is what makes it deliver
     /// `SIGWINCH` to the child so it redraws (PRD §16.4).
     pub fn resize(&self, size: TerminalSize) -> io::Result<()> {
-        self.pty.resize(to_pty_size(size)).map_err(io::Error::other)
+        self.0.resize(to_pty_size(size)).map_err(io::Error::other)
+    }
+}
+
+impl Pty {
+    /// Spawn `program` with `args` on a new pty of `size`.
+    ///
+    /// The child becomes the leader of its own session with the pty as its
+    /// controlling terminal, which is what makes job control, `Ctrl+C` and
+    /// `isatty()` behave the way a shell expects.
+    pub fn spawn<S: AsRef<std::ffi::OsStr>>(
+        program: S,
+        args: &[S],
+        size: TerminalSize,
+    ) -> io::Result<Self> {
+        let (pty, pts) = pty_process::blocking::open().map_err(io::Error::other)?;
+        // Set the size before the child starts, so it never sees the 0x0 that a
+        // fresh pty reports and lays itself out for a screen that never was.
+        pty.resize(to_pty_size(size)).map_err(io::Error::other)?;
+        let child = pty_process::blocking::Command::new(program)
+            .args(args.iter())
+            .spawn(pts)
+            .map_err(io::Error::other)?;
+        Ok(Self {
+            handle: PtyHandle(pty),
+            child,
+        })
+    }
+
+    /// A second handle to the same descriptor, for the reader thread.
+    pub fn try_clone_handle(&self) -> io::Result<PtyHandle> {
+        self.handle.try_clone()
+    }
+
+    /// Read output from the child. `Ok(0)` means the far end has gone.
+    pub fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.handle.read(buf)
+    }
+
+    /// Read output, giving up if `interrupt` fires first.
+    pub fn read_interruptible(
+        &mut self,
+        buf: &mut [u8],
+        interrupt: &Interrupt,
+    ) -> io::Result<usize> {
+        self.handle.read_interruptible(buf, interrupt)
+    }
+
+    /// Send input to the child.
+    pub fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.handle.write_all(bytes)
+    }
+
+    /// Tell the kernel the window size (PRD §16.4).
+    pub fn resize(&self, size: TerminalSize) -> io::Result<()> {
+        self.handle.resize(size)
     }
 
     /// The child's process id.
@@ -279,6 +338,17 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100)); // let the trap be set
         pty.shutdown(Duration::from_millis(100)).expect("shutdown");
         assert!(pty.child_has_exited().expect("wait"));
+    }
+
+    #[test]
+    fn a_cloned_handle_reads_the_same_pty() {
+        // The reader thread gets one of these while the writer keeps the other,
+        // so a blocking read never holds anything the writer needs.
+        let pty = sh("echo shared", TerminalSize::new(24, 80));
+        let mut handle = pty.try_clone_handle().expect("clone");
+        let mut buf = [0u8; 64];
+        let n = handle.read(&mut buf).expect("read");
+        assert_eq!(&buf[..n], b"shared\r\n");
     }
 
     #[test]
