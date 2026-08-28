@@ -51,44 +51,62 @@ pub struct LogicalLine {
 }
 
 impl LogicalLine {
-    /// Pack a run of active-grid cells into a frozen logical line. Trailing
-    /// blank cells are dropped (they carry nothing visible); cells sharing a
-    /// style coalesce into one run.
-    pub fn from_cells(id: LineId, cells: &[Cell]) -> Self {
-        let end = cells
-            .iter()
-            .rposition(|c| !c.is_blank())
-            .map_or(0, |i| i + 1);
-        let cells = &cells[..end];
+    /// An empty logical line, to be filled by [`LogicalLine::push_cells`]. Used
+    /// when freezing a straddling line into scrollback one row at a time (#24).
+    pub fn new(id: LineId) -> Self {
+        Self {
+            id,
+            text: String::new(),
+            runs: Vec::new(),
+            wrap_cache: None,
+        }
+    }
 
-        let mut text = String::new();
-        let mut runs: Vec<AttrRun> = Vec::new();
-        for cell in cells {
-            let start = text.len() as u32;
-            text.push_str(&cell.content);
-            let len = text.len() as u32 - start;
-            if let Some(last) = runs.last_mut()
+    /// Pack a run of active-grid cells into a frozen logical line, dropping
+    /// trailing blanks and coalescing equal styles.
+    pub fn from_cells(id: LineId, cells: &[Cell]) -> Self {
+        let mut line = Self::new(id);
+        line.push_cells(cells, true);
+        line
+    }
+
+    /// Append cells to the end of the line. `trim_trailing` drops trailing blank
+    /// cells and is set only for the row that ends the logical line (a hard
+    /// newline); soft-wrapped continuation rows pass `false` to keep their full
+    /// width. Wide-character spacer cells (empty content) contribute no bytes.
+    pub fn push_cells(&mut self, cells: &[Cell], trim_trailing: bool) {
+        let end = if trim_trailing {
+            cells
+                .iter()
+                .rposition(|c| !c.is_blank())
+                .map_or(0, |i| i + 1)
+        } else {
+            cells.len()
+        };
+        for cell in &cells[..end] {
+            if cell.content.is_empty() {
+                continue;
+            }
+            let start = self.text.len() as u32;
+            self.text.push_str(&cell.content);
+            let len = self.text.len() as u32 - start;
+            if let Some(last) = self.runs.last_mut()
                 && last.fg == cell.fg
                 && last.bg == cell.bg
                 && last.attrs == cell.attrs
             {
                 last.byte_len += len;
-                continue;
+            } else {
+                self.runs.push(AttrRun {
+                    byte_start: start,
+                    byte_len: len,
+                    fg: cell.fg,
+                    bg: cell.bg,
+                    attrs: cell.attrs,
+                });
             }
-            runs.push(AttrRun {
-                byte_start: start,
-                byte_len: len,
-                fg: cell.fg,
-                bg: cell.bg,
-                attrs: cell.attrs,
-            });
         }
-        Self {
-            id,
-            text,
-            runs,
-            wrap_cache: None,
-        }
+        self.wrap_cache = None;
     }
 
     pub fn id(&self) -> LineId {

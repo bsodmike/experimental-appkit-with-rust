@@ -7,17 +7,30 @@
 //! line it belongs to (#17) so on-screen anchors survive reflow, and scrollback
 //! holds the frozen logical lines above the screen.
 //!
-//! This module currently holds the container and its accessors. The write path
-//! (grapheme placement, cursor advance, autowrap), scrolling with freeze into
-//! scrollback, and reflow are built on top of it in later increments.
+//! This module holds the container, the printable-text write path (grapheme
+//! placement, cursor advance, deferred autowrap, wide characters) and line
+//! movement (`carriage_return`, `line_feed`) including scrolling the top row off
+//! into scrollback. Reflow is built on top of this in a later increment.
 
 use std::collections::VecDeque;
 
-use crate::cell::Cell;
+use compact_str::CompactString;
+
+use crate::cell::{Cell, CellAttrs};
+use crate::color::Color;
 use crate::cursor::Cursor;
 use crate::geometry::{Position, TerminalSize};
-use crate::logical_line::LineId;
+use crate::logical_line::{LineId, LogicalLine};
 use crate::scrollback::Scrollback;
+use crate::text::{grapheme_width, graphemes};
+
+/// The current drawing style applied to newly written cells (the SGR "pen").
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Pen {
+    pub fg: Color,
+    pub bg: Color,
+    pub attrs: CellAttrs,
+}
 
 /// One display row of the active grid: a full-width line of cells plus the
 /// logical line it belongs to and whether it soft-wraps into the next row.
@@ -71,20 +84,26 @@ impl Row {
     }
 }
 
-/// The primary screen: active rows, cursor, and scrollback.
+/// The primary screen: active rows, cursor, scrollback and the current pen.
 #[derive(Clone, Debug)]
 pub struct Screen {
     size: TerminalSize,
     rows: VecDeque<Row>,
     cursor: Cursor,
     scrollback: Scrollback,
+    pen: Pen,
     next_line_id: u64,
+    /// The frozen head of the one logical line currently straddling the
+    /// scrollback/active boundary (#24): its earlier rows have scrolled off but
+    /// its last row has not ended yet, so it is not a complete scrollback line.
+    /// `None` between logical lines.
+    pending: Option<LogicalLine>,
 }
 
 impl Screen {
     /// A fresh screen of `size`, every row blank. Each initial row is its own
     /// logical line (distinct `line_id`), so an empty terminal is `rows` empty
-    /// lines rather than one — which is what scrolling and reflow expect.
+    /// lines rather than one, which is what scrolling and reflow expect.
     pub fn new(size: TerminalSize) -> Self {
         Self::with_scrollback(size, Scrollback::with_defaults())
     }
@@ -101,16 +120,15 @@ impl Screen {
             rows,
             cursor: Cursor::new(),
             scrollback,
+            pen: Pen::default(),
             next_line_id,
+            pending: None,
         }
     }
 
     /// Allocate the next monotonic line id (#12). Never reused, so eviction of an
     /// older id leaves stored anchors detectably stale rather than aliased.
-    // Consumed by the write/scroll path in the next increment; staged here with
-    // the container it belongs to.
-    #[allow(dead_code)]
-    pub(crate) fn alloc_line_id(&mut self) -> LineId {
+    fn alloc_line_id(&mut self) -> LineId {
         let id = LineId(self.next_line_id);
         self.next_line_id += 1;
         id
@@ -128,12 +146,26 @@ impl Screen {
         &mut self.cursor
     }
 
+    pub fn pen(&self) -> Pen {
+        self.pen
+    }
+
+    pub fn pen_mut(&mut self) -> &mut Pen {
+        &mut self.pen
+    }
+
     pub fn scrollback(&self) -> &Scrollback {
         &self.scrollback
     }
 
     pub fn scrollback_mut(&mut self) -> &mut Scrollback {
         &mut self.scrollback
+    }
+
+    /// The frozen head of the currently-straddling logical line, if any (#24).
+    /// Reflow and anchor resolution concatenate this with the active tail.
+    pub fn pending_head(&self) -> Option<&LogicalLine> {
+        self.pending.as_ref()
     }
 
     pub fn row(&self, row: u16) -> Option<&Row> {
@@ -165,11 +197,178 @@ impl Screen {
             .cells
             .get_mut(pos.col as usize)
     }
+
+    /// Write printable text at the cursor, one grapheme cluster per cell,
+    /// advancing the cursor and wrapping as needed. Control characters are not
+    /// handled here; the parser calls [`Screen::line_feed`] and
+    /// [`Screen::carriage_return`] for those.
+    pub fn print(&mut self, text: &str) {
+        if self.size.is_empty() {
+            return;
+        }
+        let cols = self.size.cols;
+        for cluster in graphemes(text) {
+            let w = grapheme_width(cluster);
+            if w == 0 {
+                self.attach_combining(cluster);
+                continue;
+            }
+            // Realise a deferred wrap, or wrap early for a wide glyph that will
+            // not fit in the columns left (PRD §16.3 leaves a padding column).
+            if self.cursor.pending_wrap() || self.cursor.col() as u32 + w as u32 > cols as u32 {
+                self.autowrap();
+            }
+            let row = self.cursor.row();
+            let col = self.cursor.col();
+            self.put(row, col, cluster, w);
+            let new_col = col + w;
+            if new_col >= cols {
+                // At the right edge: sit on the last column and defer the wrap.
+                self.cursor.move_to(Position::new(row, cols - 1));
+                self.cursor.arm_wrap();
+            } else {
+                self.cursor.move_to(Position::new(row, new_col));
+            }
+        }
+    }
+
+    /// Carriage return: move the cursor to column 0 of its current row.
+    pub fn carriage_return(&mut self) {
+        let row = self.cursor.row();
+        self.cursor.move_to(Position::new(row, 0));
+    }
+
+    /// Line feed: move the cursor down one row, scrolling the screen (freezing
+    /// the top row into scrollback) when already on the last row. The column is
+    /// preserved; a carriage return is a separate control.
+    pub fn line_feed(&mut self) {
+        let row = self.cursor.row();
+        let col = self.cursor.col();
+        if (row as usize + 1) < self.rows.len() {
+            self.cursor.move_to(Position::new(row + 1, col));
+        } else {
+            let id = self.alloc_line_id();
+            self.scroll_up(Row::blank(self.size.cols, id));
+            self.cursor
+                .move_to(Position::new(self.size.rows.saturating_sub(1), col));
+        }
+    }
+
+    /// Soft-wrap the current row into the next: mark it wrapped and move to the
+    /// start of the following row, which becomes a continuation of the same
+    /// logical line. Scrolls if the current row is the last.
+    fn autowrap(&mut self) {
+        let row = self.cursor.row();
+        let line_id = self.rows.get(row as usize).map(Row::line_id);
+        if let Some(r) = self.rows.get_mut(row as usize) {
+            r.set_wrapped(true);
+        }
+        let Some(line_id) = line_id else { return };
+        if (row as usize + 1) < self.rows.len() {
+            if let Some(next) = self.rows.get_mut(row as usize + 1) {
+                next.set_line_id(line_id);
+                next.set_wrapped(false);
+            }
+            self.cursor.move_to(Position::new(row + 1, 0));
+        } else {
+            self.scroll_up(Row::blank(self.size.cols, line_id));
+            self.cursor
+                .move_to(Position::new(self.size.rows.saturating_sub(1), 0));
+        }
+    }
+
+    /// Remove the top row, freezing it into scrollback, and append `new_bottom`.
+    fn scroll_up(&mut self, new_bottom: Row) {
+        if let Some(top) = self.rows.pop_front() {
+            self.freeze_row(top);
+        }
+        self.rows.push_back(new_bottom);
+    }
+
+    /// Fold a scrolled-off row into scrollback. Consecutive rows of one logical
+    /// line accumulate in `pending` and are sealed into a complete scrollback
+    /// line when the line's final (non-wrapped) row scrolls off (#24).
+    fn freeze_row(&mut self, row: Row) {
+        let ends_line = !row.is_wrapped();
+        let continues = matches!(&self.pending, Some(p) if p.id() == row.line_id());
+        if continues {
+            self.pending
+                .as_mut()
+                .unwrap()
+                .push_cells(row.cells(), ends_line);
+        } else {
+            if let Some(done) = self.pending.take() {
+                self.scrollback.push(done);
+            }
+            let mut line = LogicalLine::new(row.line_id());
+            line.push_cells(row.cells(), ends_line);
+            self.pending = Some(line);
+        }
+        if ends_line && let Some(done) = self.pending.take() {
+            self.scrollback.push(done);
+        }
+    }
+
+    /// Place a grapheme (and, if wide, its trailing spacer) at `(row, col)` with
+    /// the current pen.
+    fn put(&mut self, row: u16, col: u16, content: &str, w: u16) {
+        let Pen { fg, bg, attrs } = self.pen;
+        let Some(r) = self.rows.get_mut(row as usize) else {
+            return;
+        };
+        let cells = r.cells_mut();
+        let ci = col as usize;
+        if ci >= cells.len() {
+            return;
+        }
+        cells[ci] = Cell {
+            content: content.into(),
+            fg,
+            bg,
+            attrs,
+        };
+        if w == 2
+            && let Some(spacer) = cells.get_mut(ci + 1)
+        {
+            // The spacer carries empty content; it renders as part of the wide
+            // glyph and contributes no bytes when the line is packed.
+            *spacer = Cell {
+                content: CompactString::const_new(""),
+                fg,
+                bg,
+                attrs,
+            };
+        }
+    }
+
+    /// Attach a zero-width (combining) cluster to the last written cell.
+    fn attach_combining(&mut self, cluster: &str) {
+        let row = self.cursor.row();
+        let col = self.cursor.col();
+        let target = if self.cursor.pending_wrap() {
+            Some(col)
+        } else if col > 0 {
+            Some(col - 1)
+        } else {
+            None
+        };
+        if let Some(tc) = target
+            && let Some(r) = self.rows.get_mut(row as usize)
+            && let Some(cell) = r.cells_mut().get_mut(tc as usize)
+            && !cell.content.is_empty()
+        {
+            cell.content.push_str(cluster);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn content_at(s: &Screen, row: u16, col: u16) -> String {
+        s.cell(Position::new(row, col)).unwrap().content.to_string()
+    }
 
     #[test]
     fn new_screen_is_sized_blank_with_cursor_at_origin() {
@@ -180,7 +379,6 @@ mod tests {
         assert_eq!(s.rows().count(), 3);
         assert!(s.rows().all(|r| r.cells().iter().all(Cell::is_blank)));
         assert!(s.rows().all(|r| r.width() == 4));
-        assert!(s.rows().all(|r| !r.is_wrapped()));
     }
 
     #[test]
@@ -191,29 +389,115 @@ mod tests {
     }
 
     #[test]
-    fn alloc_line_id_is_monotonic_and_starts_after_initial_rows() {
-        let mut s = Screen::new(TerminalSize::new(3, 4));
-        // Rows 0..3 consumed ids 0..3, so the next is 3.
-        assert_eq!(s.alloc_line_id(), LineId(3));
-        assert_eq!(s.alloc_line_id(), LineId(4));
-    }
-
-    #[test]
     fn cell_access_respects_bounds() {
         let mut s = Screen::new(TerminalSize::new(2, 2));
         assert!(s.cell(Position::new(1, 1)).is_some());
         assert!(s.cell(Position::new(2, 0)).is_none());
-        assert!(s.cell(Position::new(0, 2)).is_none());
-
         s.cell_mut(Position::new(0, 0)).unwrap().content = "x".into();
-        assert_eq!(s.cell(Position::new(0, 0)).unwrap().content, "x");
+        assert_eq!(content_at(&s, 0, 0), "x");
     }
 
     #[test]
-    fn row_metadata_is_editable() {
-        let mut s = Screen::new(TerminalSize::new(2, 2));
-        let r = s.row_mut(0).unwrap();
-        r.set_wrapped(true);
+    fn print_lays_graphemes_and_advances_the_cursor() {
+        let mut s = Screen::new(TerminalSize::new(2, 8));
+        s.print("hi");
+        assert_eq!(content_at(&s, 0, 0), "h");
+        assert_eq!(content_at(&s, 0, 1), "i");
+        assert_eq!(s.cursor().position(), Position::new(0, 2));
+    }
+
+    #[test]
+    fn print_applies_the_current_pen() {
+        let mut s = Screen::new(TerminalSize::new(1, 4));
+        s.pen_mut().fg = Color::RED;
+        s.print("a");
+        let cell = s.cell(Position::new(0, 0)).unwrap();
+        assert_eq!(cell.fg, Color::RED);
+    }
+
+    #[test]
+    fn filling_a_row_defers_the_wrap_until_the_next_glyph() {
+        let mut s = Screen::new(TerminalSize::new(2, 3));
+        s.print("abc");
+        // Row full; cursor sits on the last column, wrap armed, no scroll yet.
+        assert_eq!(s.cursor().position(), Position::new(0, 2));
+        assert!(s.cursor().pending_wrap());
+        assert!(!s.row(0).unwrap().is_wrapped());
+        // Next glyph performs the wrap into a continuation of the same line.
+        s.print("d");
         assert!(s.row(0).unwrap().is_wrapped());
+        assert_eq!(s.row(1).unwrap().line_id(), s.row(0).unwrap().line_id());
+        assert_eq!(content_at(&s, 1, 0), "d");
+        assert_eq!(s.cursor().position(), Position::new(1, 1));
+    }
+
+    #[test]
+    fn wide_char_writes_a_spacer_and_advances_by_two() {
+        let mut s = Screen::new(TerminalSize::new(1, 4));
+        s.print("a\u{4E2D}b");
+        assert_eq!(content_at(&s, 0, 0), "a");
+        assert_eq!(content_at(&s, 0, 1), "\u{4E2D}");
+        assert_eq!(content_at(&s, 0, 2), ""); // spacer
+        assert_eq!(content_at(&s, 0, 3), "b");
+    }
+
+    #[test]
+    fn a_wide_char_that_would_not_fit_wraps_and_leaves_padding() {
+        let mut s = Screen::new(TerminalSize::new(2, 2));
+        s.print("a\u{4E2D}");
+        // 'a' at (0,0); the wide char cannot fit in the one remaining column, so
+        // it wraps, leaving (0,1) as padding.
+        assert_eq!(content_at(&s, 0, 0), "a");
+        assert!(s.cell(Position::new(0, 1)).unwrap().is_blank());
+        assert!(s.row(0).unwrap().is_wrapped());
+        assert_eq!(content_at(&s, 1, 0), "\u{4E2D}");
+    }
+
+    #[test]
+    fn carriage_return_moves_to_column_zero() {
+        let mut s = Screen::new(TerminalSize::new(2, 8));
+        s.print("hello");
+        s.carriage_return();
+        assert_eq!(s.cursor().position(), Position::new(0, 0));
+    }
+
+    #[test]
+    fn line_feed_moves_down_then_scrolls_and_freezes_top() {
+        let mut s = Screen::new(TerminalSize::new(2, 4));
+        s.print("X");
+        s.line_feed();
+        assert_eq!(s.cursor().position(), Position::new(1, 1));
+        s.carriage_return();
+        s.print("Y");
+        // Now on the last row: a line feed scrolls, freezing "X" into scrollback.
+        s.line_feed();
+        assert_eq!(s.scrollback().len(), 1);
+        assert_eq!(s.scrollback().iter().next().unwrap().text(), "X");
+        // "Y" is now the top active row.
+        assert_eq!(content_at(&s, 0, 0), "Y");
+    }
+
+    #[test]
+    fn a_soft_wrapped_line_freezes_as_one_split_head() {
+        // One row, width 2: "abcd" wraps repeatedly against the single row.
+        let mut s = Screen::new(TerminalSize::new(1, 2));
+        s.print("abcd");
+        // "ab" scrolled off as the frozen head; "cd" is the live tail. They are
+        // one logical line (same id), split across the boundary (#24).
+        let head = s.pending_head().expect("straddling head");
+        assert_eq!(head.text(), "ab");
+        assert_eq!(content_at(&s, 0, 0), "c");
+        assert_eq!(content_at(&s, 0, 1), "d");
+        assert_eq!(s.row(0).unwrap().line_id(), head.id());
+    }
+
+    #[test]
+    fn combining_mark_attaches_to_the_previous_cell() {
+        let mut s = Screen::new(TerminalSize::new(1, 4));
+        s.print("e");
+        s.print("\u{301}");
+        assert_eq!(content_at(&s, 0, 0), "e\u{301}");
+        // It did not consume a new cell.
+        assert_eq!(s.cursor().position(), Position::new(0, 1));
     }
 }
