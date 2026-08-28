@@ -708,6 +708,12 @@ What matters more than the choice: **the Rust side is identical either way.** Th
 C ABI does not change. This decision is reversible; the ones in §6, §7 and §10
 are not.
 
+**Implemented.** The native half has its own blueprint in `docs/PRD-mac.md`,
+with the macOS concepts it rests on in `docs/PRD-mac-01-concepts.md`. It takes
+the recommendation above: Objective-C++, with the frontend split into
+platform-free C++ (tested on Linux against the real staticlib) and AppKit shims
+that only translate.
+
 ---
 
 ## 14. The header, and the build
