@@ -19,6 +19,7 @@ pub mod color;
 pub mod cursor;
 pub mod geometry;
 pub mod grid;
+pub mod text;
 
 pub use cell::{Cell, CellAttrs};
 pub use color::Color;

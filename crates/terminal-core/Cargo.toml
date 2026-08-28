@@ -11,3 +11,5 @@ path = "src/lib.rs"
 
 [dependencies]
 compact_str = "0.8"
+unicode-segmentation = "1"
+unicode-width = "0.2"
