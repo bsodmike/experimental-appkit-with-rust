@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use terminal_core::prelude::{Frame, Session, TerminalSize};
+use terminal_core::prelude::{Frame, Key, Modifiers, Session, TerminalSize};
 
 use crate::interrupt::Interrupt;
 use crate::pty::Pty;
@@ -107,6 +107,28 @@ impl Terminal {
     /// Send input to the shell: the bytes a keystroke encoded to (PRD §8).
     pub fn send(&self, bytes: &[u8]) -> io::Result<()> {
         self.pty().write_all(bytes)
+    }
+
+    /// Send a keystroke: the engine encodes it against the current modes
+    /// (PRD §8), and the bytes go down the pty.
+    pub fn send_key(&self, key: Key, mods: Modifiers) -> io::Result<()> {
+        let bytes = self.session.encode_key(key, mods);
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        self.send(&bytes)
+    }
+
+    /// Send committed text from the input system — the other input channel of
+    /// PRD §8, which needs no encoding because it is already UTF-8.
+    pub fn send_text(&self, text: &str) -> io::Result<()> {
+        self.send(text.as_bytes())
+    }
+
+    /// Send pasted text, bracketed if the program asked for that.
+    pub fn paste(&self, text: &str) -> io::Result<()> {
+        let bytes = self.session.encode_paste(text);
+        self.send(&bytes)
     }
 
     /// Resize both halves: the engine reflows, and the kernel delivers
@@ -262,6 +284,26 @@ mod tests {
         wait_for("the shell to hang up", || terminal.has_hung_up());
         let text = screen_text(&terminal);
         assert!(text.contains("[1;1R"), "screen was: {text:?}");
+    }
+
+    #[test]
+    fn a_keystroke_reaches_the_shell_as_the_bytes_the_terminal_defines() {
+        // -isig so Ctrl+C is delivered as a byte rather than as a signal; the
+        // "ready" handshake keeps the keystrokes from arriving before stty has
+        // run, when the line discipline would still swallow them.
+        let terminal = sh("stty -echo -icanon -isig; echo ready; head -c 4 | cat -v");
+        wait_for("the shell to be listening", || {
+            screen_text(&terminal).contains("ready")
+        });
+        terminal
+            .send_key(Key::Up, Modifiers::NONE)
+            .expect("send arrow");
+        terminal
+            .send_key(Key::Char('c'), Modifiers::CTRL)
+            .expect("send ctrl-c");
+        wait_for("the shell to hang up", || terminal.has_hung_up());
+        let text = screen_text(&terminal);
+        assert!(text.contains("^[[A^C"), "screen was: {text:?}");
     }
 
     #[test]

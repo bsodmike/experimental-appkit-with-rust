@@ -21,6 +21,7 @@ mod color;
 mod cursor;
 mod geometry;
 mod grid;
+mod keys;
 mod logical_line;
 mod parsers;
 mod render;
@@ -41,6 +42,7 @@ pub mod prelude {
     pub use crate::cursor::Cursor;
     pub use crate::geometry::{Position, TerminalSize};
     pub use crate::grid::Grid;
+    pub use crate::keys::{Key, Keypad, Modifiers, encode_key, encode_paste};
     pub use crate::logical_line::{AttrRun, LineId, LogicalLine};
     pub use crate::render::{Frame, Run};
     pub use crate::screen::{Modes, Pen, Row, Screen};

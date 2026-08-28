@@ -26,6 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::geometry::TerminalSize;
+use crate::keys::{Key, Modifiers};
 use crate::parsers::vt::VtParser;
 use crate::render::Frame;
 use crate::screen::Screen;
@@ -136,6 +137,19 @@ impl Session {
         let out = f(&mut self.lock().screen);
         self.mark_dirty();
         out
+    }
+
+    /// Encode a keystroke against the current modes (PRD §8). The bytes go to
+    /// the PTY; nothing on the screen changes here.
+    pub fn encode_key(&self, key: Key, mods: Modifiers) -> Vec<u8> {
+        let modes = self.with_screen(|screen| screen.modes());
+        crate::keys::encode_key(key, mods, modes)
+    }
+
+    /// Encode pasted text, bracketed if the program asked for that.
+    pub fn encode_paste(&self, text: &str) -> Vec<u8> {
+        let modes = self.with_screen(|screen| screen.modes());
+        crate::keys::encode_paste(text, modes)
     }
 
     /// Resize the terminal, reflowing under the lock (PRD §16.4).
@@ -284,6 +298,18 @@ mod tests {
         let session = Session::new(TerminalSize::new(2, 8));
         let _ = session.feed(b"\x1b]2;my shell\x07");
         assert_eq!(session.title(), "my shell");
+    }
+
+    #[test]
+    fn keys_are_encoded_against_the_modes_the_program_set() {
+        let session = Session::new(TerminalSize::new(3, 10));
+        assert_eq!(session.encode_key(Key::Up, Modifiers::NONE), b"\x1b[A");
+        let _ = session.feed(b"\x1b[?1h"); // the program turns on DECCKM
+        assert_eq!(session.encode_key(Key::Up, Modifiers::NONE), b"\x1bOA");
+
+        assert_eq!(session.encode_paste("ls"), b"ls");
+        let _ = session.feed(b"\x1b[?2004h");
+        assert_eq!(session.encode_paste("ls"), b"\x1b[200~ls\x1b[201~");
     }
 
     #[test]
