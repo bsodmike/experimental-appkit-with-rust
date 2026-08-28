@@ -12,6 +12,8 @@ path = "src/lib.rs"
 crate-type = ["staticlib", "lib"]
 
 [dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 terminal-core = { path = "../terminal-core" }
 terminal-pty = { path = "../terminal-pty" }
 

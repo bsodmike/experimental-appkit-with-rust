@@ -38,6 +38,10 @@ struct Config {
     std::string shell;
     std::vector<std::string> shell_args;
     bool option_is_meta = true;
+    /// Where to write a log of the whole loop. Empty means no logging, which
+    /// is the default: a terminal that writes a file every time you open it
+    /// without being asked is a terminal nobody trusts.
+    std::string log_dir;
     std::uint16_t rows = kDefaultRows;
     std::uint16_t cols = kDefaultCols;
     Theme theme;

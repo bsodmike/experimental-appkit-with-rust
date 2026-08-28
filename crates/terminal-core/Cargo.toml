@@ -10,6 +10,7 @@ name = "terminal_core"
 path = "src/lib.rs"
 
 [dependencies]
+tracing = "0.1"
 compact_str = "0.8"
 nom = "7"
 unicode-segmentation = "1"

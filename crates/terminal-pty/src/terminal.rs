@@ -95,6 +95,7 @@ impl Terminal {
                             break;
                         }
                     }
+                    tracing::info!(target: "crustty::pty", "reader thread stopping");
                     hung_up.store(true, Ordering::Release);
                     // Mark the screen dirty so the UI redraws once more and
                     // notices the shell has gone.
@@ -185,6 +186,7 @@ impl Terminal {
     /// Idempotent: calling it twice, or after the shell has already exited, is
     /// fine.
     pub fn shutdown(&self) -> io::Result<std::process::ExitStatus> {
+        tracing::info!(target: "crustty::pty", "shutdown: silence, interrupt, join, hang up");
         self.session.shutdown();
         self.interrupt.fire();
         if let Some(thread) = self.reader.lock().unwrap_or_else(|e| e.into_inner()).take() {

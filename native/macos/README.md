@@ -107,6 +107,40 @@ line and what was wrong with it, in release builds as much as debug ones.
 Everything valid in the file still applies. Any keystroke dismisses the band;
 ⌘R brings it back if the file is still wrong.
 
+## Watching the loop
+
+The engine traces itself. `just run` turns it on and writes to `./logs`:
+
+```sh
+just logs        # tail -f the current run
+```
+
+```
+INFO crustty::pty: shell started on a new pty program=/bin/zsh pid=13324 rows=24 cols=80
+INFO feed{seq=1}: crustty::session: read from the pty bytes=42 preview=\e]0;~\a%
+INFO feed{seq=1}: crustty::vt: decoded fed=42 commands=6 printable=12 pending=0
+INFO feed{seq=1}: crustty::screen: applied applied=6 cursor=0,12 scrollback=0 alternate=false
+INFO feed{seq=1}: crustty::session: waking the ui
+INFO crustty::render: frame copied for the ui runs=1 text=12 cursor=0,12
+```
+
+Each chunk read from the shell gets a `feed{seq=N}` span, so one burst of output
+can be followed from the descriptor through the parser and the screen to the
+repaint. The line worth watching is `waking the ui`: it appears **once per
+burst**, not once per read, which is the coalescing that stops a large `cat`
+from drowning the main thread.
+
+`log-dir` in the config file does the same thing without the environment
+variable, and `RUST_LOG` changes the level:
+
+```sh
+RUST_LOG=warn just run          # quiet
+RUST_LOG=crustty::vt=info just run   # only the parser
+```
+
+Logging is off unless asked for, and never writes to stderr — a terminal's
+diagnostics have no business near a stream of terminal output.
+
 ## Checking it works
 
 `just test` covers what can be automated. The rest needs eyes:

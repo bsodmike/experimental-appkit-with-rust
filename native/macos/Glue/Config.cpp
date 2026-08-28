@@ -131,6 +131,8 @@ Config resolve(const ParsedFile& file, const char* env_shell) {
                 shell_args_given = true;
             }
             config.shell_args.push_back(entry.value);
+        } else if (entry.key == "log-dir") {
+            config.log_dir = entry.value;
         } else if (entry.key == "option-is-meta") {
             bool flag = true;
             if (!parse_bool(entry.value, flag)) {

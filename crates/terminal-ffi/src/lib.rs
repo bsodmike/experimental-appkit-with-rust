@@ -361,6 +361,76 @@ unsafe fn as_slice<'a>(bytes: TerminalBytes) -> Option<&'a [u8]> {
     Some(unsafe { std::slice::from_raw_parts(bytes.bytes, bytes.len as usize) })
 }
 
+/// Start writing a log of everything crossing the loop to `dir`.
+///
+/// One file per run, named by the second it started, plus a `latest.log`
+/// symlink beside it so that `tail -f` needs no arguments. Logging goes to a
+/// file rather than to stderr on purpose: a terminal's diagnostics have no
+/// business anywhere near a stream of terminal output (PRD §12).
+///
+/// Level defaults to INFO and is overridable with `RUST_LOG`. Calling this more
+/// than once is harmless; only the first call takes effect, because a process
+/// has one global subscriber.
+///
+/// # Safety
+/// `dir` must point to `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn terminal_init_logging(dir: *const u8, len: u32) -> TerminalStatus {
+    guard(|| {
+        let Some(bytes) = (unsafe { as_slice(TerminalBytes { bytes: dir, len }) }) else {
+            return TerminalStatus::InvalidArgument;
+        };
+        let Ok(dir) = std::str::from_utf8(bytes) else {
+            return TerminalStatus::InvalidArgument;
+        };
+        if dir.is_empty() {
+            return TerminalStatus::InvalidArgument;
+        }
+        match init_logging(std::path::Path::new(dir)) {
+            Ok(()) => TerminalStatus::Ok,
+            Err(e) => {
+                set_last_error(format!("terminal_init_logging: {e}"));
+                TerminalStatus::IoError
+            }
+        }
+    })
+}
+
+fn init_logging(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if STARTED.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(dir)?;
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = dir.join(format!("crustty-{seconds}.log"));
+    let file = std::fs::File::create(&path)?;
+
+    // A stable name to tail. Replaced rather than appended to, so it always
+    // points at this run.
+    let latest = dir.join("latest.log");
+    let _ = std::fs::remove_file(&latest);
+    #[cfg(unix)]
+    let _ = std::os::unix::fs::symlink(&path, &latest);
+
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_writer(file)
+        .with_ansi(false)
+        .with_target(true)
+        .with_env_filter(filter)
+        .init();
+
+    tracing::info!(target: "crustty::ffi", path = %path.display(), "logging started");
+    Ok(())
+}
+
 /// Start a shell on a new pty and return the handle.
 ///
 /// Returns null if the configuration is unusable or the shell cannot start.
@@ -515,6 +585,7 @@ pub unsafe extern "C" fn terminal_send_text(
         let Some(text) = (unsafe { as_slice(TerminalBytes { bytes, len }) }) else {
             return TerminalStatus::InvalidArgument;
         };
+        tracing::info!(target: "crustty::ffi", bytes = text.len(), "send_text");
         match session.terminal.send(text) {
             Ok(()) => TerminalStatus::Ok,
             Err(_) => TerminalStatus::IoError,
@@ -539,6 +610,12 @@ pub unsafe extern "C" fn terminal_send_key(
         let Some(key) = key_of(event) else {
             return TerminalStatus::InvalidArgument;
         };
+        tracing::info!(
+            target: "crustty::ffi",
+            key = ?event.code,
+            modifiers = event.modifiers,
+            "send_key"
+        );
         match session
             .terminal
             .send_key(key, modifiers_of(event.modifiers))
@@ -593,6 +670,7 @@ pub unsafe extern "C" fn terminal_resize(
         if rows == 0 || cols == 0 {
             return TerminalStatus::InvalidArgument;
         }
+        tracing::info!(target: "crustty::ffi", rows, cols, "resize");
         match session.terminal.resize(TerminalSize::new(rows, cols)) {
             Ok(()) => TerminalStatus::Ok,
             Err(_) => TerminalStatus::IoError,

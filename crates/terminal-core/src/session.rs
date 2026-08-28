@@ -41,6 +41,9 @@ struct Emulator {
 
 struct Shared {
     emulator: Mutex<Emulator>,
+    /// Counts chunks read from the program, so a log line can be tied to the
+    /// read it came from.
+    chunks: std::sync::atomic::AtomicU64,
     /// Set when the screen has changed since the last frame was taken. Only its
     /// `false -> true` transition posts a redraw.
     dirty: AtomicBool,
@@ -77,6 +80,7 @@ impl Session {
                     screen: Screen::new(size),
                     parser: VtParser::new(),
                 }),
+                chunks: std::sync::atomic::AtomicU64::new(0),
                 dirty: AtomicBool::new(false),
                 running: AtomicBool::new(true),
                 wake_up: Box::new(wake_up),
@@ -101,11 +105,31 @@ impl Session {
     /// back to the PTY.
     #[must_use = "these bytes are owed to the program: write them to the PTY (PRD §9)"]
     pub fn feed(&self, bytes: &[u8]) -> Vec<u8> {
+        // One span per chunk, so every event below carries the same sequence
+        // number and a chunk can be followed all the way to the screen.
+        let seq = self.shared.chunks.fetch_add(1, Ordering::Relaxed) + 1;
+        let span = tracing::info_span!("feed", seq);
+        let _entered = span.enter();
+        tracing::info!(
+            target: "crustty::session",
+            bytes = bytes.len(),
+            preview = %preview(bytes),
+            "read from the pty"
+        );
+
         let replies = {
             let mut emulator = self.lock();
             let Emulator { screen, parser } = &mut *emulator;
             screen.advance(parser, bytes)
         };
+        if !replies.is_empty() {
+            tracing::info!(
+                target: "crustty::session",
+                bytes = replies.len(),
+                preview = %preview(&replies),
+                "owed back to the program"
+            );
+        }
         // Outside the lock: the callback may call back into this session.
         self.mark_dirty();
         replies
@@ -118,8 +142,19 @@ impl Session {
     /// mid-copy sets it again and earns one redundant redraw. Clearing it after
     /// would lose that write until something else happened to set the flag.
     pub fn render_into(&self, frame: &mut Frame) {
-        self.shared.dirty.store(false, Ordering::Release);
+        // Whether this redraw was owed one, which is what makes the log show a
+        // burst of output turning into exactly one repaint.
+        let was_dirty = self.shared.dirty.swap(false, Ordering::AcqRel);
         self.lock().screen.render_into(frame);
+        if was_dirty {
+            tracing::info!(
+                target: "crustty::render",
+                runs = frame.runs().len(),
+                text = frame.text().len(),
+                cursor = %format_args!("{},{}", frame.cursor().row, frame.cursor().col),
+                "frame copied for the ui"
+            );
+        }
     }
 
     /// Whether the screen has changed since the last frame was taken.
@@ -181,9 +216,35 @@ impl Session {
     /// Must be called with the lock released.
     fn mark_dirty(&self) {
         if !self.shared.dirty.swap(true, Ordering::AcqRel) && self.is_running() {
+            // Only this edge wakes the UI. Everything after it in a burst is
+            // absorbed, which is the single most important thing this log shows.
+            tracing::info!(target: "crustty::session", "waking the ui");
             (self.shared.wake_up)();
         }
     }
+}
+
+/// A short, printable rendering of a byte slice, for a log line.
+///
+/// Control characters become their escaped forms, because the interesting part
+/// of terminal traffic is exactly the bytes you cannot print.
+fn preview(bytes: &[u8]) -> String {
+    const MAX: usize = 48;
+    let mut out = String::with_capacity(MAX + 8);
+    for &byte in bytes.iter().take(MAX) {
+        match byte {
+            0x1B => out.push_str("\\e"),
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            0x20..=0x7E => out.push(byte as char),
+            _ => out.push_str(&format!("\\x{byte:02x}")),
+        }
+    }
+    if bytes.len() > MAX {
+        out.push_str("...");
+    }
+    out
 }
 
 impl std::fmt::Debug for Session {

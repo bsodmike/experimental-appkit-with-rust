@@ -30,6 +30,10 @@ struct SessionConfig {
     void* wake_up_ctx = nullptr;
 };
 
+/// Start logging the loop to `dir`, if `dir` is not empty. Safe to call more
+/// than once; only the first call takes effect.
+void init_logging(const std::string& dir);
+
 /// A running terminal. Non-copyable, movable, and destroyed exactly once.
 class Session {
   public:

@@ -209,12 +209,19 @@ impl PtyHandle {
 
     /// Send input to the child.
     pub fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        tracing::info!(target: "crustty::pty", bytes = bytes.len(), "writing to the pty");
         self.0.write_all(bytes)
     }
 
     /// Tell the kernel the window size, which is what makes it deliver
     /// `SIGWINCH` to the child so it redraws (PRD §16.4).
     pub fn resize(&self, size: TerminalSize) -> io::Result<()> {
+        tracing::info!(
+            target: "crustty::pty",
+            rows = size.rows,
+            cols = size.cols,
+            "window size to the kernel; the child gets SIGWINCH"
+        );
         self.0.resize(to_pty_size(size)).map_err(io::Error::other)
     }
 }
@@ -254,6 +261,14 @@ impl Pty {
         }
 
         let child = command.spawn(pts).map_err(io::Error::other)?;
+        tracing::info!(
+            target: "crustty::pty",
+            program = %options.program.to_string_lossy(),
+            pid = child.id(),
+            rows = size.rows,
+            cols = size.cols,
+            "shell started on a new pty"
+        );
         Ok(Self {
             handle: PtyHandle(pty),
             child,
@@ -322,6 +337,7 @@ impl Pty {
         let pid = rustix::process::Pid::from_child(&self.child);
         let _ = rustix::process::kill_process(pid, rustix::process::Signal::HUP);
 
+        tracing::info!(target: "crustty::pty", pid = ?self.child.id(), "hanging up the shell");
         let deadline = std::time::Instant::now() + grace;
         loop {
             if let Some(status) = self.child.try_wait()? {

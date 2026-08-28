@@ -11,6 +11,7 @@ name = "terminal_pty"
 path = "src/lib.rs"
 
 [dependencies]
+tracing = "0.1"
 pty-process = "0.5"
 rustix = { version = "1", features = ["event", "pipe", "process", "termios"] }
 terminal-core = { path = "../terminal-core" }

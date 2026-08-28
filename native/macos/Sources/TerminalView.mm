@@ -126,6 +126,15 @@ static void CrusttyWakeUp(void *ctx) {
 #pragma mark - Session
 
 - (BOOL)startSession {
+    // Before the shell exists, so that starting it is itself in the log. The
+    // config file wins; CRUSTTY_LOG_DIR is the convenience `just run` uses.
+    std::string logDir = _config.log_dir;
+    if (logDir.empty()) {
+        const char *fromEnv = getenv("CRUSTTY_LOG_DIR");
+        logDir = fromEnv != nullptr ? fromEnv : "";
+    }
+    glue::init_logging(logDir);
+
     glue::SessionConfig config;
     config.program = _config.shell;
     config.args = _config.shell_args;

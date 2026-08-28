@@ -190,6 +190,24 @@ impl VtParser {
             }
         }
         self.buf.drain(..pos);
+
+        if !out.is_empty() {
+            let printed: usize = out
+                .iter()
+                .map(|cmd| match cmd {
+                    Command::Print(text) => text.chars().count(),
+                    _ => 0,
+                })
+                .sum();
+            tracing::info!(
+                target: "crustty::vt",
+                fed = bytes.len(),
+                commands = out.len(),
+                printable = printed,
+                pending = self.buf.len(),
+                "decoded"
+            );
+        }
         out
     }
 }

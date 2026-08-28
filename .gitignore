@@ -7,3 +7,6 @@ native/macos/*.xcodeproj/
 native/macos/build/
 native/macos/Local.xcconfig
 native/macos/Info.generated.plist
+
+# Logs are per-run and belong to whoever ran it.
+logs/*.log

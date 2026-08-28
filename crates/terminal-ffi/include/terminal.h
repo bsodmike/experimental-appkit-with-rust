@@ -310,6 +310,23 @@ extern "C" {
 #endif // __cplusplus
 
 /**
+ * Start writing a log of everything crossing the loop to `dir`.
+ *
+ * One file per run, named by the second it started, plus a `latest.log`
+ * symlink beside it so that `tail -f` needs no arguments. Logging goes to a
+ * file rather than to stderr on purpose: a terminal's diagnostics have no
+ * business anywhere near a stream of terminal output (PRD §12).
+ *
+ * Level defaults to INFO and is overridable with `RUST_LOG`. Calling this more
+ * than once is harmless; only the first call takes effect, because a process
+ * has one global subscriber.
+ *
+ * # Safety
+ * `dir` must point to `len` readable bytes.
+ */
+TerminalStatus terminal_init_logging(const uint8_t *dir, uint32_t len);
+
+/**
  * Start a shell on a new pty and return the handle.
  *
  * Returns null if the configuration is unusable or the shell cannot start.

@@ -827,8 +827,21 @@ impl Screen {
     /// allocate.
     #[must_use = "these bytes are owed to the program: write them to the PTY (PRD §9)"]
     pub fn advance(&mut self, parser: &mut VtParser, bytes: &[u8]) -> Vec<u8> {
-        for cmd in parser.feed(bytes) {
-            self.apply(&cmd);
+        let commands = parser.feed(bytes);
+        let applied = commands.len();
+        for cmd in &commands {
+            self.apply(cmd);
+        }
+        if applied > 0 {
+            let cursor = self.cursor.position();
+            tracing::info!(
+                target: "crustty::screen",
+                applied,
+                cursor = %format_args!("{},{}", cursor.row, cursor.col),
+                scrollback = self.scrollback.len(),
+                alternate = self.is_alternate(),
+                "applied"
+            );
         }
         self.take_replies()
     }

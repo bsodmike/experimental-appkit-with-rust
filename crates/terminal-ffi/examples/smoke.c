@@ -49,6 +49,13 @@ int main(void) {
     config.wake_up = wake_up;
     config.wake_up_ctx = NULL;
 
+    /* Log the whole loop to ./logs, so the smoke test doubles as a way to see
+     * bytes moving from the shell to the screen. */
+    const char *log_dir = getenv("CRUSTTY_LOG_DIR");
+    if (log_dir != NULL) {
+        terminal_init_logging((const uint8_t *)log_dir, (uint32_t)strlen(log_dir));
+    }
+
     TerminalSession *session = terminal_create(&config);
     if (session == NULL) {
         fprintf(stderr, "terminal_create failed\n");

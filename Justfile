@@ -166,9 +166,11 @@ build: check-xcode generate
     xcodebuild -project {{project}} -scheme {{app}} -configuration Debug build \
         CURRENT_PROJECT_VERSION="$(git rev-list --count HEAD)" | tail -5
 
-# Build and run, with the app's log output in this terminal.
+# Build and run, with the app's log output in this terminal and the engine's
+# trace in ./logs (see `just logs`).
 run: build
-    exec {{build_dir}}/Debug/{{app}}.app/Contents/MacOS/{{app}}
+    mkdir -p logs
+    CRUSTTY_LOG_DIR="$PWD/logs" exec {{build_dir}}/Debug/{{app}}.app/Contents/MacOS/{{app}}
 
 # Rebuild and relaunch whenever a source file changes.
 watch:
@@ -207,7 +209,14 @@ test-mac: check-xcode generate
 
 # The C program that drives the whole boundary (PRD §14).
 smoke:
-    ./crates/terminal-ffi/examples/run-smoke.sh
+    mkdir -p logs
+    CRUSTTY_LOG_DIR="$PWD/logs" ./crates/terminal-ffi/examples/run-smoke.sh
+
+# Follow the engine's trace: bytes arriving, commands decoded, cells written,
+# the UI woken, the frame copied. One file per run; latest.log is this one.
+logs:
+    @test -e logs/latest.log || { echo "no log yet -- run: just run" >&2; exit 1; }
+    tail -f logs/latest.log
 
 # ---------------------------------------------------------------- ship
 
@@ -283,3 +292,4 @@ lint:
 clean:
     cargo clean
     rm -rf {{build_dir}} {{project}} target/glue-tests
+    rm -f logs/*.log

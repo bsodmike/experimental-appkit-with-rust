@@ -10,6 +10,14 @@ TerminalBytes bytes_of(const std::string& s) {
 
 }  // namespace
 
+void init_logging(const std::string& dir) {
+    if (dir.empty()) {
+        return;
+    }
+    terminal_init_logging(reinterpret_cast<const std::uint8_t*>(dir.data()),
+                          static_cast<std::uint32_t>(dir.size()));
+}
+
 Session::~Session() { close(); }
 
 Session& Session::operator=(Session&& other) noexcept {

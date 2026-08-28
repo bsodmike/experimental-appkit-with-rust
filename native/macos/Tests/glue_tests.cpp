@@ -527,6 +527,12 @@ TEST(parse_errors_and_value_errors_are_reported_together) {
     CHECK_EQ(config.diagnostics.size(), 2u);
 }
 
+TEST(logging_is_off_until_a_directory_is_named) {
+    CHECK(config_from("").log_dir.empty());
+    CHECK_EQ(config_from("log-dir = /tmp/crustty-logs").log_dir,
+             std::string("/tmp/crustty-logs"));
+}
+
 TEST(zoom_walks_within_the_limits) {
     CHECK_EQ(zoomed(13.0, 1), 14.0);
     CHECK_EQ(zoomed(13.0, -1), 12.0);

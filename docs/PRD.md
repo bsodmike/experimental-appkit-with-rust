@@ -637,6 +637,13 @@ Conventions:
 - Rust's logging must never write to stdout/stderr — those are the PTY's, and
   diagnostic output injected into the terminal stream corrupts the display.
 
+**Implemented.** All three crates emit `tracing` events, and
+`terminal_init_logging(dir)` attaches a subscriber that writes to a file in that
+directory — never to a stream. It is off unless a directory is named, by
+`log-dir` in the frontend's config or by `CRUSTTY_LOG_DIR`. At INFO the events
+follow one chunk of output from the pty through the parser and the screen to the
+repaint, under a span carrying the chunk's sequence number.
+
 ---
 
 ## 13. Objective-C++ or Swift?
