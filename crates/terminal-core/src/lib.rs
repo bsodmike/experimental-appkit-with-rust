@@ -26,6 +26,7 @@ mod parsers;
 mod render;
 mod screen;
 mod scrollback;
+mod session;
 mod text;
 
 /// The crate's public surface. Import it with `use terminal_core::prelude::*;`.
@@ -44,6 +45,7 @@ pub mod prelude {
     pub use crate::render::{Frame, Run};
     pub use crate::screen::{Modes, Pen, Row, Screen};
     pub use crate::scrollback::Scrollback;
+    pub use crate::session::Session;
 
     /// The byte-stream parsers, reachable as `prelude::parsers::vt`.
     pub mod parsers {
