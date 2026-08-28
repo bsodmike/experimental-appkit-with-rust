@@ -22,6 +22,7 @@ mod cursor;
 mod geometry;
 mod grid;
 mod logical_line;
+mod parsers;
 mod screen;
 mod scrollback;
 mod text;
@@ -41,4 +42,11 @@ pub mod prelude {
     pub use crate::logical_line::{AttrRun, LineId, LogicalLine};
     pub use crate::screen::{Pen, Row, Screen};
     pub use crate::scrollback::Scrollback;
+
+    /// The byte-stream parsers, reachable as `prelude::parsers::vt`.
+    pub mod parsers {
+        pub mod vt {
+            pub use crate::parsers::vt::{Command, EraseMode, Sgr, VtParser};
+        }
+    }
 }
