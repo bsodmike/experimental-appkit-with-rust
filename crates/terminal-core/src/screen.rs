@@ -116,6 +116,12 @@ pub struct Screen {
     scroll_top: u16,
     scroll_bottom: u16,
     modes: Modes,
+    /// The window title the program has asked for (OSC 0/2). The frontend reads
+    /// it; the engine never interprets it.
+    title: String,
+    /// Bytes the engine owes the program on the write side of the PTY: answers
+    /// to DSR/DA queries. Drained by whoever owns the PTY (PRD §7).
+    replies: Vec<u8>,
     /// The DECSC stash. `None` until something is saved; a restore with nothing
     /// saved homes the cursor and resets the pen (VT100).
     saved: Option<SavedCursor>,
@@ -185,6 +191,8 @@ impl Screen {
             scroll_top: 0,
             scroll_bottom: size.rows.saturating_sub(1),
             modes: Modes::default(),
+            title: String::new(),
+            replies: Vec::new(),
             saved: None,
         }
     }
@@ -211,6 +219,64 @@ impl Screen {
 
     pub fn pen(&self) -> Pen {
         self.pen
+    }
+
+    /// The window title the program last asked for. Empty until it asks.
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// OSC 0/2: set the window title.
+    pub fn set_title(&mut self, title: &str) {
+        // Bounded, because it arrives from the program: a title is a line of
+        // chrome, not a place to park a megabyte.
+        const MAX_TITLE_CHARS: usize = 512;
+        self.title = title.chars().take(MAX_TITLE_CHARS).collect();
+    }
+
+    /// Take the bytes the engine owes the program, leaving the queue empty.
+    ///
+    /// A query like `CSI 6 n` is answered *upstream*, into the PTY, not on the
+    /// screen: parsing therefore has an output side. The engine does not own the
+    /// PTY, so it queues the answer here and the caller that does own it — the
+    /// session wrapper of PRD §7 — writes it after each parse.
+    pub fn take_replies(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.replies)
+    }
+
+    /// Whether any reply is waiting to be written back.
+    pub fn has_replies(&self) -> bool {
+        !self.replies.is_empty()
+    }
+
+    /// Queue a reply, dropping it if the queue has grown past its cap.
+    ///
+    /// The cap matters: a program can ask faster than anyone drains, and an
+    /// unbounded queue would be a memory leak driven by untrusted output.
+    fn reply(&mut self, bytes: &[u8]) {
+        const MAX_PENDING_REPLY_BYTES: usize = 4096;
+        if self.replies.len() + bytes.len() <= MAX_PENDING_REPLY_BYTES {
+            self.replies.extend_from_slice(bytes);
+        }
+    }
+
+    /// Answer a DSR query. Anything but the two forms below is ignored: an
+    /// invented answer is worse than none.
+    pub fn device_status_report(&mut self, kind: u16) {
+        match kind {
+            5 => self.reply(b"\x1b[0n"),
+            6 => {
+                // CPR is 1-based, like the cursor addressing it mirrors.
+                let (row, col) = (self.cursor.row() + 1, self.cursor.col() + 1);
+                self.reply(format!("\x1b[{row};{col}R").as_bytes());
+            }
+            _ => {}
+        }
+    }
+
+    /// Answer a primary DA query: a VT102, which is what the engine implements.
+    pub fn device_attributes(&mut self) {
+        self.reply(b"\x1b[?6c");
     }
 
     /// The current terminal modes.
@@ -706,6 +772,9 @@ impl Screen {
                 }
             }
             Command::Reset => self.reset(),
+            Command::DeviceStatusReport(kind) => self.device_status_report(*kind),
+            Command::DeviceAttributes => self.device_attributes(),
+            Command::SetTitle(t) => self.set_title(t),
             Command::EraseInDisplay(mode) => self.erase_in_display(*mode),
             Command::EraseInLine(mode) => self.erase_in_line(*mode),
             Command::Sgr(list) => {
@@ -1692,6 +1761,72 @@ mod tests {
             Position::new(0, 0),
             "the stash is gone too"
         );
+    }
+
+    #[test]
+    fn a_cursor_position_query_is_answered_upstream_and_not_on_screen() {
+        let mut s = Screen::new(TerminalSize::new(5, 10));
+        let mut p = VtParser::new();
+        s.advance(&mut p, b"\x1b[3;5H\x1b[6n");
+        assert_eq!(s.take_replies(), b"\x1b[3;5R", "CPR is 1-based");
+        assert_eq!(row_str(&s, 2), "", "the answer never touches the screen");
+        assert!(!s.has_replies(), "taking the replies empties the queue");
+    }
+
+    #[test]
+    fn status_and_attribute_queries_are_answered() {
+        let mut s = Screen::new(TerminalSize::new(2, 8));
+        let mut p = VtParser::new();
+        s.advance(&mut p, b"\x1b[5n\x1b[c");
+        assert_eq!(s.take_replies(), b"\x1b[0n\x1b[?6c");
+    }
+
+    #[test]
+    fn an_unknown_status_query_is_left_unanswered() {
+        // Better silence than an invented answer a program would believe.
+        let mut s = Screen::new(TerminalSize::new(2, 8));
+        let mut p = VtParser::new();
+        s.advance(&mut p, b"\x1b[99n");
+        assert!(!s.has_replies());
+    }
+
+    #[test]
+    fn replies_stop_accumulating_once_the_queue_is_full() {
+        let mut s = Screen::new(TerminalSize::new(2, 8));
+        let mut p = VtParser::new();
+        // A program can ask far faster than anyone drains.
+        for _ in 0..2000 {
+            s.advance(&mut p, b"\x1b[5n");
+        }
+        assert!(s.take_replies().len() <= 4096);
+    }
+
+    #[test]
+    fn an_osc_sets_the_window_title() {
+        let mut s = Screen::new(TerminalSize::new(2, 8));
+        let mut p = VtParser::new();
+        assert_eq!(s.title(), "");
+        s.advance(&mut p, b"\x1b]0;my shell\x07");
+        assert_eq!(s.title(), "my shell");
+        assert_eq!(row_str(&s, 0), "", "the title never lands on the screen");
+    }
+
+    #[test]
+    fn a_title_is_bounded() {
+        let mut s = Screen::new(TerminalSize::new(2, 8));
+        let long = "x".repeat(10_000);
+        s.set_title(&long);
+        assert_eq!(s.title().chars().count(), 512);
+    }
+
+    #[test]
+    fn a_reset_leaves_the_title_alone() {
+        // RIS resets the terminal, but the window title is the window's, and
+        // the program that set it is still the one running.
+        let mut s = Screen::new(TerminalSize::new(2, 8));
+        let mut p = VtParser::new();
+        s.advance(&mut p, b"\x1b]2;kept\x07\x1bc");
+        assert_eq!(s.title(), "kept");
     }
 
     #[test]

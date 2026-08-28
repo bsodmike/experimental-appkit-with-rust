@@ -85,6 +85,14 @@ pub enum Command {
     },
     /// RIS: reset the terminal to its power-on state.
     Reset,
+    /// DSR: the program is asking a question the engine must answer on the
+    /// write side of the PTY. `5` is "are you there", `6` is "where is the
+    /// cursor" (CPR).
+    DeviceStatusReport(u16),
+    /// DA: "what kind of terminal are you".
+    DeviceAttributes,
+    /// OSC 0/2: the window title the program wants shown.
+    SetTitle(String),
     /// A recognised-but-unhandled sequence, already consumed. Never surfaced by
     /// [`VtParser::feed`]; kept as a variant so the parser can report progress.
     Ignored,
@@ -284,20 +292,40 @@ fn parse_csi(input: &[u8]) -> IResult<&[u8], Command> {
 }
 
 /// OSC body (bytes after `ESC ]`): consume up to the terminator (`BEL`, or
-/// `ST` = `ESC \`). Not acted on yet.
+/// `ST` = `ESC \`), then interpret it.
 fn parse_osc(input: &[u8]) -> IResult<&[u8], Command> {
     let mut i = 0;
     while i < input.len() {
         match input[i] {
-            0x07 => return Ok((&input[i + 1..], Command::Ignored)),
+            0x07 => return Ok((&input[i + 1..], osc_command(&input[..i]))),
             ESC if i + 1 < input.len() && input[i + 1] == b'\\' => {
-                return Ok((&input[i + 2..], Command::Ignored));
+                return Ok((&input[i + 2..], osc_command(&input[..i])));
             }
             ESC if i + 1 >= input.len() => break, // maybe start of ST; need more
             _ => i += 1,
         }
     }
     Err(Err::Incomplete(Needed::new(1)))
+}
+
+/// Interpret an OSC body (`Ps ; Pt`). Only the title-setting commands are acted
+/// on; the rest — colour queries, hyperlinks, the working directory — are
+/// consumed and dropped.
+fn osc_command(body: &[u8]) -> Command {
+    let mut parts = body.splitn(2, |&b| b == b';');
+    let ps = parts.next().unwrap_or(b"");
+    let Some(text) = parts.next() else {
+        return Command::Ignored;
+    };
+    // 0 sets both the window title and the icon name, 2 sets the title. 1 sets
+    // the icon name alone, which has no place in this UI, so it is dropped.
+    if ps != b"0" && ps != b"2" {
+        return Command::Ignored;
+    }
+    // Titles come from the program and are not trusted to be UTF-8; control
+    // characters are stripped so a title can never redraw anything.
+    let text = String::from_utf8_lossy(text);
+    Command::SetTitle(text.chars().filter(|c| !c.is_control()).collect())
 }
 
 fn dispatch_csi(params_bytes: &[u8], final_b: u8) -> Command {
@@ -343,6 +371,8 @@ fn dispatch_csi(params_bytes: &[u8], final_b: u8) -> Command {
         b'J' => Command::EraseInDisplay(erase_mode(param(&params, 0, 0))),
         b'K' => Command::EraseInLine(erase_mode(param(&params, 0, 0))),
         b'm' => Command::Sgr(parse_sgr(&params)),
+        b'n' => Command::DeviceStatusReport(param(&params, 0, 0)),
+        b'c' => Command::DeviceAttributes,
         _ => Command::Ignored,
     }
 }
@@ -614,6 +644,15 @@ mod tests {
         );
     }
 
+    #[rstest]
+    #[case(b"\x1b[5n", Command::DeviceStatusReport(5))]
+    #[case(b"\x1b[6n", Command::DeviceStatusReport(6))]
+    #[case(b"\x1b[c", Command::DeviceAttributes)]
+    #[case(b"\x1b[0c", Command::DeviceAttributes)]
+    fn queries(#[case] input: &[u8], #[case] expected: Command) {
+        assert_eq!(feed(input), vec![expected]);
+    }
+
     #[test]
     fn a_private_prefix_never_reaches_the_standard_dispatch() {
         // `CSI ? 3 r` is XTRESTORE, not a scroll region, and `CSI ? 1 J` is
@@ -700,11 +739,40 @@ mod tests {
         assert_eq!(feed(b"\x1b(Bhi"), vec![Command::Print("hi".into())]);
     }
 
+    #[rstest]
+    #[case(b"\x1b]0;hello\x07", "hello")]
+    #[case(b"\x1b]2;hello\x1b\\", "hello")]
+    #[case(b"\x1b]0;\x07", "")]
+    fn osc_sets_the_title(#[case] input: &[u8], #[case] expected: &str) {
+        assert_eq!(feed(input), vec![Command::SetTitle(expected.to_string())]);
+    }
+
+    #[test]
+    fn titles_are_stripped_of_control_characters() {
+        // A title is untrusted program output; it must not be able to redraw.
+        assert_eq!(
+            feed(b"\x1b]0;ok\x1b[31mred\x07"),
+            vec![Command::SetTitle("ok[31mred".to_string())]
+        );
+    }
+
+    #[test]
+    fn other_osc_commands_are_consumed_without_acting() {
+        assert_eq!(feed(b"\x1b]1;icon\x07"), vec![], "icon name alone");
+        assert_eq!(feed(b"\x1b]7;file:///tmp\x07"), vec![], "working directory");
+        assert_eq!(feed(b"\x1b]10;?\x07"), vec![], "colour query");
+    }
+
     #[test]
     fn an_osc_is_consumed_up_to_its_terminator() {
+        // The sequence ends at the BEL: the text after it is ordinary output,
+        // not part of the title.
         assert_eq!(
             feed(b"\x1b]0;title\x07after"),
-            vec![Command::Print("after".into())]
+            vec![
+                Command::SetTitle("title".to_string()),
+                Command::Print("after".into()),
+            ]
         );
     }
 
