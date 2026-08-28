@@ -143,7 +143,7 @@ mod tests {
 
     fn cell(content: &str) -> Cell {
         Cell {
-            content: content.to_string(),
+            content: content.into(),
             ..Cell::blank()
         }
     }
@@ -181,7 +181,7 @@ mod tests {
     fn get_mut_allows_in_place_edit() {
         let mut g = Grid::new(TerminalSize::new(1, 1));
         let c = g.get_mut(Position::new(0, 0)).unwrap();
-        c.content = "q".to_string();
+        c.content = "q".into();
         c.attrs.insert(CellAttrs::BOLD);
         c.fg = Color::RED;
         let c = g.get(Position::new(0, 0)).unwrap();

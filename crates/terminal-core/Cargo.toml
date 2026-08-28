@@ -10,3 +10,4 @@ name = "terminal_core"
 path = "src/lib.rs"
 
 [dependencies]
+compact_str = "0.8"

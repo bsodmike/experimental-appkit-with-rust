@@ -2,22 +2,24 @@
 //!
 //! ## A note on content
 //!
-//! A [`Cell`] stores its character as a `String` holding one UTF-8 *grapheme
-//! cluster*. This is what lets a cell represent combining marks (`e` + U+0301)
-//! and emoji ZWJ sequences, which PRD §10 requires and a single `char` cannot
-//! hold. A lone space denotes an empty cell.
+//! A [`Cell`] stores its character as a [`CompactString`] holding one UTF-8
+//! *grapheme cluster*. This is what lets a cell represent combining marks
+//! (`e` + U+0301) and emoji ZWJ sequences, which PRD §10 requires and a single
+//! `char` cannot hold. A lone space denotes an empty cell.
 //!
-//! Two things are deliberately still open, to be settled with the buffer model:
+//! `CompactString` stores clusters up to 24 bytes inline with no heap
+//! allocation (PRD §17.5, #19), which is every real grapheme cluster. Bulk
+//! scrollback is stored separately as packed UTF-8 text plus attribute runs
+//! (PRD §17.5, #18), not as `Cell`s, so this type only ever backs the bounded
+//! active grid.
 //!
-//! - **Memory representation.** `String` heap-allocates for each cell. That is
-//!   fine for the bounded active grid, but bulk scrollback storage (PRD §16.1)
-//!   will likely pack text differently; a small-string / arena optimisation is
-//!   deferred until that model exists.
-//! - **The wide-character spacer.** A double-width grapheme occupies two
-//!   columns with a trailing spacer cell (PRD §10). How that spacer is marked
-//!   arrives with wide-character handling in the grid, not here.
+//! One thing is deliberately still open: **the wide-character spacer.** A
+//! double-width grapheme occupies two columns with a trailing spacer cell
+//! (PRD §10). How that spacer is marked arrives with wide-character handling in
+//! the grid, not here.
 
 use crate::color::Color;
+use compact_str::CompactString;
 
 /// A bit-set of display attributes for one cell.
 ///
@@ -113,7 +115,7 @@ impl std::fmt::Debug for CellAttrs {
 pub struct Cell {
     /// The grapheme cluster shown in this cell, as UTF-8. A single space
     /// denotes an empty cell.
-    pub content: String,
+    pub content: CompactString,
     pub fg: Color,
     pub bg: Color,
     pub attrs: CellAttrs,
@@ -122,9 +124,9 @@ pub struct Cell {
 impl Cell {
     /// An empty cell: a space with default colours and no attributes. This is
     /// what a freshly cleared or newly allocated grid position holds.
-    pub fn blank() -> Self {
+    pub const fn blank() -> Self {
         Self {
-            content: String::from(" "),
+            content: CompactString::const_new(" "),
             fg: Color::Default,
             bg: Color::Default,
             attrs: CellAttrs::EMPTY,
@@ -181,7 +183,7 @@ mod tests {
         // Base letter plus a combining acute accent: a single grapheme made of
         // two scalar values, which a `char` could never have held.
         let mut c = Cell::blank();
-        c.content = String::from("e\u{301}");
+        c.content = CompactString::const_new("e\u{301}");
         assert_eq!(c.content.chars().count(), 2);
         assert!(!c.is_blank());
     }
