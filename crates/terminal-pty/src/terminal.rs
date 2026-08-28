@@ -414,7 +414,14 @@ mod tests {
         assert!(!process_exists(pid), "the shell outlived its terminal");
     }
 
+    /// `kill -0` rather than /proc, which macOS does not have. A reaped child
+    /// is gone entirely, so this is false once the drop has waited for it.
     fn process_exists(pid: u32) -> bool {
-        std::path::Path::new(&format!("/proc/{pid}")).exists()
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
     }
 }

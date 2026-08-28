@@ -408,10 +408,13 @@ mod tests {
     #[test]
     fn the_child_is_a_session_leader_with_a_controlling_terminal() {
         // If it were not, `tty` would print "not a tty" and every full-screen
-        // program would behave as though it were writing to a file.
+        // program would behave as though it were writing to a file. The device
+        // name differs by platform -- /dev/pts/3 on Linux, /dev/ttys003 on
+        // macOS -- so only the part that means something is asserted.
         let mut pty = sh("tty", TerminalSize::new(24, 80));
         let out = read_to_end(&mut pty);
-        assert!(out.contains("/dev/pts/"), "unexpected output: {out:?}");
+        assert!(out.starts_with("/dev/"), "unexpected output: {out:?}");
+        assert!(!out.contains("not a tty"), "unexpected output: {out:?}");
     }
 
     #[test]
