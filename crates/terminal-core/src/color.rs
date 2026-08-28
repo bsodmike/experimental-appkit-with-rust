@@ -52,6 +52,46 @@ impl Color {
     pub const fn is_default(self) -> bool {
         matches!(self, Color::Default)
     }
+
+    /// Pack into the `u32` that crosses the FFI boundary in a render run
+    /// (PRD §10).
+    ///
+    /// The top byte is a tag and the low bytes the payload, so `Default`
+    /// survives the trip rather than being resolved to an RGB the frontend can
+    /// no longer tell apart from a real colour:
+    ///
+    /// - `0x00_000000` — the terminal default; the frontend substitutes its theme
+    /// - `0x01_0000II` — palette index `II`
+    /// - `0x02_RRGGBB` — truecolour
+    pub const fn pack(self) -> u32 {
+        match self {
+            Color::Default => 0,
+            Color::Indexed(i) => (Self::TAG_INDEXED << 24) | i as u32,
+            Color::Rgb(r, g, b) => {
+                (Self::TAG_RGB << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32
+            }
+        }
+    }
+
+    /// The inverse of [`Color::pack`]. `None` for a tag or payload this
+    /// encoding never produces.
+    pub const fn unpack(bits: u32) -> Option<Self> {
+        let payload = bits & 0x00ff_ffff;
+        match bits >> 24 {
+            Self::TAG_DEFAULT if payload == 0 => Some(Color::Default),
+            Self::TAG_INDEXED if payload <= 0xff => Some(Color::Indexed(payload as u8)),
+            Self::TAG_RGB => Some(Color::Rgb(
+                (payload >> 16) as u8,
+                (payload >> 8) as u8,
+                payload as u8,
+            )),
+            _ => None,
+        }
+    }
+
+    const TAG_DEFAULT: u32 = 0x00;
+    const TAG_INDEXED: u32 = 0x01;
+    const TAG_RGB: u32 = 0x02;
 }
 
 #[cfg(test)]
@@ -80,5 +120,44 @@ mod tests {
         // resolved colour, so "asked for default" survives round-trips.
         assert_ne!(Color::Default, Color::Indexed(0));
         assert_ne!(Color::Default, Color::Rgb(0, 0, 0));
+    }
+
+    #[test]
+    fn packing_round_trips_every_variant() {
+        for c in [
+            Color::Default,
+            Color::Indexed(0),
+            Color::Indexed(255),
+            Color::RED,
+            Color::Rgb(0, 0, 0),
+            Color::Rgb(255, 255, 255),
+            Color::Rgb(1, 2, 3),
+        ] {
+            assert_eq!(Color::unpack(c.pack()), Some(c), "round trip of {c:?}");
+        }
+    }
+
+    #[test]
+    fn the_default_colour_packs_to_zero() {
+        // A zeroed run therefore reads as "default on default", which is what a
+        // frontend that forgets to fill a field should see.
+        assert_eq!(Color::Default.pack(), 0);
+    }
+
+    #[test]
+    fn packed_colours_stay_distinguishable_by_tag() {
+        // Black-as-palette-0, black-as-RGB and the default must not collide, or
+        // the frontend can no longer theme them apart.
+        assert_ne!(Color::Indexed(0).pack(), Color::Default.pack());
+        assert_ne!(Color::Indexed(0).pack(), Color::Rgb(0, 0, 0).pack());
+        assert_eq!(Color::Indexed(9).pack(), 0x0100_0009);
+        assert_eq!(Color::Rgb(0x11, 0x22, 0x33).pack(), 0x0211_2233);
+    }
+
+    #[test]
+    fn unpacking_rejects_encodings_we_never_emit() {
+        assert_eq!(Color::unpack(0x0300_0000), None, "unknown tag");
+        assert_eq!(Color::unpack(0x0000_0001), None, "default with a payload");
+        assert_eq!(Color::unpack(0x0101_0000), None, "index out of range");
     }
 }

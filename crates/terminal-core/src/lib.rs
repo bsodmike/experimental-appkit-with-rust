@@ -23,6 +23,7 @@ mod geometry;
 mod grid;
 mod logical_line;
 mod parsers;
+mod render;
 mod screen;
 mod scrollback;
 mod text;
@@ -40,6 +41,7 @@ pub mod prelude {
     pub use crate::geometry::{Position, TerminalSize};
     pub use crate::grid::Grid;
     pub use crate::logical_line::{AttrRun, LineId, LogicalLine};
+    pub use crate::render::{Frame, Run};
     pub use crate::screen::{Pen, Row, Screen};
     pub use crate::scrollback::Scrollback;
 
