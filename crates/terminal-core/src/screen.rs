@@ -21,6 +21,7 @@ use crate::color::Color;
 use crate::cursor::Cursor;
 use crate::geometry::{Position, TerminalSize};
 use crate::logical_line::{LineId, LogicalLine};
+use crate::parsers::vt::{Command, EraseMode, Sgr, VtParser};
 use crate::scrollback::Scrollback;
 use crate::text::{display_width, grapheme_width, graphemes};
 
@@ -529,6 +530,175 @@ fn row_content_bytes(row: &Row, upto: usize) -> u32 {
         .sum()
 }
 
+/// The VT command applier and the cursor/erase editing operations it drives.
+/// These are the bounds-clamped grid edits a parsed [`Command`] maps onto; scroll
+/// regions are not modelled yet, so moves clamp to the whole screen.
+impl Screen {
+    /// Feed bytes through `parser` and apply the resulting commands. This is the
+    /// engine's main input entry point (the PTY reader calls it).
+    pub fn advance(&mut self, parser: &mut VtParser, bytes: &[u8]) {
+        for cmd in parser.feed(bytes) {
+            self.apply(&cmd);
+        }
+    }
+
+    /// Apply one parsed VT command.
+    pub fn apply(&mut self, cmd: &Command) {
+        match cmd {
+            Command::Print(s) => self.print(s),
+            Command::Bell => {} // no audible/visual bell yet
+            Command::Backspace => self.backspace(),
+            Command::Tab => self.tab(),
+            Command::LineFeed => self.line_feed(),
+            Command::CarriageReturn => self.carriage_return(),
+            Command::CursorUp(n) => self.cursor_up(*n),
+            Command::CursorDown(n) => self.cursor_down(*n),
+            Command::CursorForward(n) => self.cursor_right(*n),
+            Command::CursorBack(n) => self.cursor_left(*n),
+            Command::CursorPosition { row, col } => self.cursor_to(*row, *col),
+            Command::EraseInDisplay(mode) => self.erase_in_display(*mode),
+            Command::EraseInLine(mode) => self.erase_in_line(*mode),
+            Command::Sgr(list) => {
+                for sgr in list {
+                    self.apply_sgr(*sgr);
+                }
+            }
+            Command::Ignored => {}
+        }
+    }
+
+    fn apply_sgr(&mut self, sgr: Sgr) {
+        match sgr {
+            Sgr::Reset => self.pen = Pen::default(),
+            Sgr::Bold => self.pen.attrs.insert(CellAttrs::BOLD),
+            Sgr::Dim => self.pen.attrs.insert(CellAttrs::DIM),
+            Sgr::Italic => self.pen.attrs.insert(CellAttrs::ITALIC),
+            Sgr::Underline => self.pen.attrs.insert(CellAttrs::UNDERLINE),
+            Sgr::Reverse => self.pen.attrs.insert(CellAttrs::REVERSE),
+            Sgr::Hidden => self.pen.attrs.insert(CellAttrs::HIDDEN),
+            Sgr::Strikethrough => self.pen.attrs.insert(CellAttrs::STRIKETHROUGH),
+            Sgr::NoBoldDim => self.pen.attrs.remove(CellAttrs::BOLD | CellAttrs::DIM),
+            Sgr::NoItalic => self.pen.attrs.remove(CellAttrs::ITALIC),
+            Sgr::NoUnderline => self.pen.attrs.remove(CellAttrs::UNDERLINE),
+            Sgr::NoReverse => self.pen.attrs.remove(CellAttrs::REVERSE),
+            Sgr::NoHidden => self.pen.attrs.remove(CellAttrs::HIDDEN),
+            Sgr::NoStrikethrough => self.pen.attrs.remove(CellAttrs::STRIKETHROUGH),
+            Sgr::Fg(c) => self.pen.fg = c,
+            Sgr::Bg(c) => self.pen.bg = c,
+            Sgr::DefaultFg => self.pen.fg = Color::Default,
+            Sgr::DefaultBg => self.pen.bg = Color::Default,
+        }
+    }
+
+    fn clamp(&self, row: u16, col: u16) -> Position {
+        Position::new(
+            row.min(self.size.rows.saturating_sub(1)),
+            col.min(self.size.cols.saturating_sub(1)),
+        )
+    }
+
+    /// Absolute cursor move, clamped to the screen.
+    pub fn cursor_to(&mut self, row: u16, col: u16) {
+        let pos = self.clamp(row, col);
+        self.cursor.move_to(pos);
+    }
+
+    pub fn cursor_up(&mut self, n: u16) {
+        let pos = self.clamp(self.cursor.row().saturating_sub(n), self.cursor.col());
+        self.cursor.move_to(pos);
+    }
+
+    pub fn cursor_down(&mut self, n: u16) {
+        let pos = self.clamp(self.cursor.row().saturating_add(n), self.cursor.col());
+        self.cursor.move_to(pos);
+    }
+
+    pub fn cursor_left(&mut self, n: u16) {
+        let pos = self.clamp(self.cursor.row(), self.cursor.col().saturating_sub(n));
+        self.cursor.move_to(pos);
+    }
+
+    pub fn cursor_right(&mut self, n: u16) {
+        let pos = self.clamp(self.cursor.row(), self.cursor.col().saturating_add(n));
+        self.cursor.move_to(pos);
+    }
+
+    /// Backspace: move the cursor one column left (it does not erase).
+    pub fn backspace(&mut self) {
+        self.cursor_left(1);
+    }
+
+    /// Advance to the next tab stop (every 8 columns), clamped to the last column.
+    pub fn tab(&mut self) {
+        let next = (self.cursor.col() / 8).saturating_add(1).saturating_mul(8);
+        let pos = self.clamp(self.cursor.row(), next);
+        self.cursor.move_to(pos);
+    }
+
+    /// A cell an erase writes: a blank carrying the current background colour, so
+    /// a coloured erase fills with that background (ECMA-48).
+    fn erase_cell(&self) -> Cell {
+        Cell {
+            content: CompactString::const_new(" "),
+            fg: Color::Default,
+            bg: self.pen.bg,
+            attrs: CellAttrs::EMPTY,
+        }
+    }
+
+    fn fill_row(&mut self, row: usize, start: usize, end: usize, cell: &Cell) {
+        if let Some(r) = self.rows.get_mut(row) {
+            let cells = r.cells_mut();
+            let end = end.min(cells.len());
+            let start = start.min(end);
+            for c in &mut cells[start..end] {
+                *c = cell.clone();
+            }
+        }
+    }
+
+    /// Erase within the cursor's row (§ CSI K).
+    pub fn erase_in_line(&mut self, mode: EraseMode) {
+        let cell = self.erase_cell();
+        let row = self.cursor.row() as usize;
+        let col = self.cursor.col() as usize;
+        let cols = self.size.cols as usize;
+        match mode {
+            EraseMode::ToEnd => self.fill_row(row, col, cols, &cell),
+            EraseMode::ToStart => self.fill_row(row, 0, col + 1, &cell),
+            EraseMode::All => self.fill_row(row, 0, cols, &cell),
+        }
+    }
+
+    /// Erase within the display (§ CSI J). Does not touch scrollback.
+    pub fn erase_in_display(&mut self, mode: EraseMode) {
+        let cell = self.erase_cell();
+        let row = self.cursor.row() as usize;
+        let col = self.cursor.col() as usize;
+        let cols = self.size.cols as usize;
+        let nrows = self.rows.len();
+        match mode {
+            EraseMode::ToEnd => {
+                self.fill_row(row, col, cols, &cell);
+                for r in (row + 1)..nrows {
+                    self.fill_row(r, 0, cols, &cell);
+                }
+            }
+            EraseMode::ToStart => {
+                for r in 0..row {
+                    self.fill_row(r, 0, cols, &cell);
+                }
+                self.fill_row(row, 0, col + 1, &cell);
+            }
+            EraseMode::All => {
+                for r in 0..nrows {
+                    self.fill_row(r, 0, cols, &cell);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -746,5 +916,91 @@ mod tests {
             .find(|c| c.content == "d")
             .unwrap();
         assert_eq!(d.fg, Color::RED);
+    }
+
+    #[test]
+    fn cursor_moves_are_clamped_to_the_screen() {
+        let mut s = Screen::new(TerminalSize::new(3, 4));
+        s.cursor_to(10, 10);
+        assert_eq!(s.cursor().position(), Position::new(2, 3));
+        s.cursor_up(1);
+        assert_eq!(s.cursor().position(), Position::new(1, 3));
+        s.cursor_left(2);
+        assert_eq!(s.cursor().position(), Position::new(1, 1));
+        s.cursor_down(9);
+        assert_eq!(s.cursor().position(), Position::new(2, 1));
+    }
+
+    #[test]
+    fn backspace_and_tab_move_the_cursor() {
+        let mut s = Screen::new(TerminalSize::new(1, 20));
+        s.cursor_to(0, 3);
+        s.backspace();
+        assert_eq!(s.cursor().col(), 2);
+        s.tab();
+        assert_eq!(s.cursor().col(), 8); // next 8-col stop
+        s.tab();
+        assert_eq!(s.cursor().col(), 16);
+    }
+
+    #[test]
+    fn erase_in_line_clears_the_requested_span() {
+        let mut s = Screen::new(TerminalSize::new(1, 6));
+        s.print("abcdef");
+        s.cursor_to(0, 3);
+        s.erase_in_line(EraseMode::ToEnd);
+        assert_eq!(row_str(&s, 0), "abc"); // cols 3.. blanked
+
+        let mut s = Screen::new(TerminalSize::new(1, 6));
+        s.print("abcdef");
+        s.cursor_to(0, 2);
+        s.erase_in_line(EraseMode::ToStart);
+        // cols 0..=2 blanked, "def" remains from col 3.
+        assert_eq!(row_str(&s, 0), "   def");
+    }
+
+    #[test]
+    fn erase_in_display_to_end_clears_below() {
+        let mut s = Screen::new(TerminalSize::new(2, 4));
+        s.print("ab");
+        s.line_feed();
+        s.carriage_return();
+        s.print("cd");
+        s.cursor_to(0, 1);
+        s.erase_in_display(EraseMode::ToEnd);
+        assert_eq!(row_str(&s, 0), "a"); // from col 1 on row 0
+        assert_eq!(row_str(&s, 1), ""); // whole row below cleared
+    }
+
+    #[test]
+    fn colored_erase_fills_with_the_current_background() {
+        let mut s = Screen::new(TerminalSize::new(1, 4));
+        s.pen_mut().bg = Color::RED;
+        s.erase_in_line(EraseMode::All);
+        assert!(s.rows().flat_map(|r| r.cells()).all(|c| c.bg == Color::RED));
+    }
+
+    #[test]
+    fn advance_drives_the_screen_from_bytes() {
+        use crate::parsers::vt::VtParser;
+        let mut s = Screen::new(TerminalSize::new(3, 10));
+        let mut p = VtParser::new();
+        // Print, newline, then a red bold 'X'.
+        s.advance(&mut p, b"hi\r\n\x1b[1;31mX");
+        assert_eq!(row_str(&s, 0), "hi");
+        let x = s.cell(Position::new(1, 0)).unwrap();
+        assert_eq!(x.content, "X");
+        assert_eq!(x.fg, Color::RED);
+        assert!(x.attrs.contains(CellAttrs::BOLD));
+    }
+
+    #[test]
+    fn sgr_reset_clears_the_pen() {
+        let mut s = Screen::new(TerminalSize::new(1, 4));
+        let mut p = VtParser::new();
+        s.advance(&mut p, b"\x1b[1;31m");
+        assert_eq!(s.pen().fg, Color::RED);
+        s.advance(&mut p, b"\x1b[0m");
+        assert_eq!(s.pen(), Pen::default());
     }
 }
