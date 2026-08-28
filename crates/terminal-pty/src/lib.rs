@@ -18,5 +18,5 @@ mod pty;
 mod terminal;
 
 pub use interrupt::Interrupt;
-pub use pty::{DEFAULT_COLORTERM, DEFAULT_TERM, Pty, PtyHandle, SpawnOptions};
+pub use pty::{ChildOutcome, DEFAULT_COLORTERM, DEFAULT_TERM, Pty, PtyHandle, SpawnOptions};
 pub use terminal::Terminal;

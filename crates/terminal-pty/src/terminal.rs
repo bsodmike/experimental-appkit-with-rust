@@ -20,7 +20,7 @@ use std::time::Duration;
 use terminal_core::prelude::{Frame, Key, Modifiers, Session, TerminalSize};
 
 use crate::interrupt::Interrupt;
-use crate::pty::{Pty, SpawnOptions};
+use crate::pty::{ChildOutcome, Pty, SpawnOptions};
 
 /// How long a child gets to honour `SIGHUP` before it is killed.
 const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
@@ -167,6 +167,15 @@ impl Terminal {
     /// Whether the shell has gone and the reader thread has stopped.
     pub fn has_hung_up(&self) -> bool {
         self.hung_up.load(Ordering::Acquire)
+    }
+
+    /// How the shell ended, if it has ended and can still be asked.
+    ///
+    /// `None` while it is still running — and also when the reader thread
+    /// stopped for its own reasons rather than the shell's, which is the case a
+    /// frontend must not read as a clean exit.
+    pub fn child_outcome(&self) -> Option<ChildOutcome> {
+        self.pty().try_status().ok().flatten()
     }
 
     /// Stop everything, in the order PRD §7 requires: silence the wake-up so no
@@ -343,6 +352,46 @@ mod tests {
         terminal.shutdown().expect("shutdown");
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(!terminal.session().is_running());
+    }
+
+    #[test]
+    fn a_clean_exit_is_distinguishable_from_a_crash() {
+        // The frontend closes the window on a clean exit and keeps it open on
+        // anything else, so this distinction is the whole rule.
+        let clean = sh("exit 0");
+        wait_for("a clean exit", || clean.has_hung_up());
+        assert_eq!(clean.child_outcome(), Some(ChildOutcome::Code(0)));
+        assert!(clean.child_outcome().unwrap().is_clean());
+
+        let failed = sh("exit 3");
+        wait_for("a failed exit", || failed.has_hung_up());
+        assert_eq!(failed.child_outcome(), Some(ChildOutcome::Code(3)));
+        assert!(!failed.child_outcome().unwrap().is_clean());
+    }
+
+    #[test]
+    fn a_signalled_child_reports_its_signal() {
+        let terminal = sh("kill -TERM $$");
+        wait_for("the signal", || terminal.has_hung_up());
+        assert_eq!(terminal.child_outcome(), Some(ChildOutcome::Signal(15)));
+        assert!(!terminal.child_outcome().unwrap().is_clean());
+    }
+
+    #[test]
+    fn a_running_shell_has_no_outcome_yet() {
+        let terminal = sh("sleep 30");
+        assert_eq!(terminal.child_outcome(), None);
+        assert!(!terminal.has_hung_up());
+    }
+
+    #[test]
+    fn the_outcome_survives_being_asked_twice() {
+        // try_wait consumes the status; asking again must not turn a clean exit
+        // into "still running", which is what the frontend would draw.
+        let terminal = sh("exit 7");
+        wait_for("the exit", || terminal.has_hung_up());
+        assert_eq!(terminal.child_outcome(), Some(ChildOutcome::Code(7)));
+        assert_eq!(terminal.child_outcome(), Some(ChildOutcome::Code(7)));
     }
 
     #[test]

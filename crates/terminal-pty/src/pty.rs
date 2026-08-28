@@ -24,6 +24,37 @@ pub const DEFAULT_TERM: &str = "xterm-256color";
 /// round-trips through the parser and out through the render runs.
 pub const DEFAULT_COLORTERM: &str = "truecolor";
 
+/// How a child process ended.
+///
+/// The distinction matters to a frontend: a shell that exited cleanly is a
+/// session the user finished, and one that was killed or failed is a screen the
+/// user probably wants to keep reading.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ChildOutcome {
+    /// Exited with this status. Zero is the ordinary end of a shell session.
+    Code(i32),
+    /// Killed by this signal.
+    Signal(i32),
+}
+
+impl ChildOutcome {
+    fn from_status(status: std::process::ExitStatus) -> Self {
+        use std::os::unix::process::ExitStatusExt;
+        match (status.code(), status.signal()) {
+            (Some(code), _) => Self::Code(code),
+            (None, Some(signal)) => Self::Signal(signal),
+            // Neither, which POSIX does not produce; reported as a failure
+            // rather than silently as success.
+            (None, None) => Self::Code(-1),
+        }
+    }
+
+    /// Whether this is the ordinary end of a session.
+    pub fn is_clean(self) -> bool {
+        matches!(self, Self::Code(0))
+    }
+}
+
 /// How to start the child process.
 ///
 /// An app bundle launched from Finder has almost no environment — no `TERM`, a
@@ -265,7 +296,16 @@ impl Pty {
 
     /// Whether the child has already exited, without blocking.
     pub fn child_has_exited(&mut self) -> io::Result<bool> {
-        Ok(self.child.try_wait()?.is_some())
+        Ok(self.try_status()?.is_some())
+    }
+
+    /// How the child ended, if it has, without blocking.
+    ///
+    /// This reaps it, so the answer is remembered rather than asked again — a
+    /// process that has been waited for once has no status to give a second
+    /// time, and callers should not have to know that.
+    pub fn try_status(&mut self) -> io::Result<Option<ChildOutcome>> {
+        Ok(self.child.try_wait()?.map(ChildOutcome::from_status))
     }
 
     /// Ask the child to go, then wait for it.

@@ -20,7 +20,7 @@ use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use terminal_core::prelude::{Frame, Key, Keypad, Modifiers, TerminalSize};
-use terminal_pty::{SpawnOptions, Terminal};
+use terminal_pty::{ChildOutcome, SpawnOptions, Terminal};
 
 /// The terminal, as C sees it: a token it stores and hands back, and never
 /// dereferences.
@@ -156,6 +156,24 @@ pub const TERMINAL_MOD_SHIFT: u16 = 1 << 0;
 pub const TERMINAL_MOD_ALT: u16 = 1 << 1;
 pub const TERMINAL_MOD_CTRL: u16 = 1 << 2;
 
+/// The bits of [`TerminalRun::attrs`]. They mirror the engine's `CellAttrs`
+/// exactly — a test in this crate fails if the two ever drift.
+pub const TERMINAL_ATTR_BOLD: u16 = 1 << 0;
+pub const TERMINAL_ATTR_DIM: u16 = 1 << 1;
+pub const TERMINAL_ATTR_ITALIC: u16 = 1 << 2;
+pub const TERMINAL_ATTR_UNDERLINE: u16 = 1 << 3;
+pub const TERMINAL_ATTR_BLINK: u16 = 1 << 4;
+pub const TERMINAL_ATTR_REVERSE: u16 = 1 << 5;
+pub const TERMINAL_ATTR_HIDDEN: u16 = 1 << 6;
+pub const TERMINAL_ATTR_STRIKETHROUGH: u16 = 1 << 7;
+
+/// The tags in the top byte of [`TerminalRun::fg`] and `bg`: how a frontend
+/// tells "the terminal default" from a colour that merely looks like one.
+pub const TERMINAL_COLOR_TAG_SHIFT: u32 = 24;
+pub const TERMINAL_COLOR_DEFAULT: u32 = 0x00;
+pub const TERMINAL_COLOR_INDEXED: u32 = 0x01;
+pub const TERMINAL_COLOR_RGB: u32 = 0x02;
+
 /// A key press as the view reports it.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -167,6 +185,26 @@ pub struct TerminalKeyEvent {
     pub number: u8,
     /// A bit-set of `TERMINAL_MOD_*`.
     pub modifiers: u16,
+}
+
+/// How the shell ended, and whether it has.
+///
+/// A frontend closes its window on a clean exit and keeps it open on anything
+/// else, so the three cases have to be distinguishable: still running, ended
+/// cleanly, ended badly. `hung_up` without `exited` is the third kind of
+/// trouble — the reader thread stopped for its own reasons and the shell's fate
+/// is unknown, which must never be read as success.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TerminalChildStatus {
+    /// The reader thread has stopped: there is nothing more to display.
+    pub hung_up: bool,
+    /// The shell was reaped and the fields below mean something.
+    pub exited: bool,
+    /// Its exit status, when it was not killed. Zero is an ordinary end.
+    pub exit_code: i32,
+    /// The signal that killed it, or zero.
+    pub signal: i32,
 }
 
 /// Called when the screen changes, once per burst rather than once per read
@@ -238,9 +276,67 @@ impl WakeContext {
     }
 }
 
+/// The most recent error, kept for diagnostics.
+///
+/// PRD §12 offers this as optional, and a Debug build of the frontend draws it
+/// on screen: a caught panic that reports only "something panicked" is the
+/// least debuggable state the app can be in. Best-effort and global rather than
+/// per-session, because a panic does not necessarily know which session it was
+/// in — and because this is a diagnostic, not an API to program against.
+static LAST_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn set_last_error(message: String) {
+    if let Ok(mut slot) = LAST_ERROR.lock() {
+        *slot = Some(message);
+    }
+}
+
+/// Where the last panic happened, captured by a hook because `catch_unwind`
+/// only hands back the payload and not the location — and the location is the
+/// half that shortens the search.
+static PANIC_LOCATION: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn install_panic_hook() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_else(|| "unknown location".to_string());
+            if let Ok(mut slot) = PANIC_LOCATION.lock() {
+                *slot = Some(location);
+            }
+            // Deliberately silent: the default hook writes to stderr, and the
+            // frontend reads the message from here instead (PRD §12).
+        }));
+    });
+}
+
+/// Turn a panic payload into something worth reading.
+fn describe_panic(payload: &Box<dyn std::any::Any + Send>) -> String {
+    let message = if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "panicked with a payload of an unknown type".to_string()
+    };
+    match PANIC_LOCATION.lock().ok().and_then(|slot| slot.clone()) {
+        Some(location) => format!("{message} ({location})"),
+        None => message,
+    }
+}
+
 /// Run `f`, turning a panic into a status instead of an abort (PRD §12).
 fn guard(f: impl FnOnce() -> TerminalStatus) -> TerminalStatus {
-    catch_unwind(AssertUnwindSafe(f)).unwrap_or(TerminalStatus::Panicked)
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(status) => status,
+        Err(payload) => {
+            set_last_error(describe_panic(&payload));
+            TerminalStatus::Panicked
+        }
+    }
 }
 
 /// Borrow a caller's byte buffer. `None` for a null pointer with a non-zero
@@ -269,8 +365,10 @@ unsafe fn as_slice<'a>(bytes: TerminalBytes) -> Option<&'a [u8]> {
 /// readable for the duration of the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn terminal_create(config: *const TerminalConfig) -> *mut TerminalSession {
+    install_panic_hook();
     let result = catch_unwind(AssertUnwindSafe(|| {
         let Some(config) = (unsafe { config.as_ref() }) else {
+            set_last_error("terminal_create: null config".to_string());
             return std::ptr::null_mut();
         };
         if config.size.rows == 0 || config.size.cols == 0 {
@@ -354,9 +452,15 @@ pub unsafe extern "C" fn terminal_create(config: *const TerminalConfig) -> *mut 
                 terminal,
                 frame: std::sync::Mutex::new(Frame::new()),
             })),
-            Err(_) => std::ptr::null_mut(),
+            Err(e) => {
+                set_last_error(format!("terminal_create: {e}"));
+                std::ptr::null_mut()
+            }
         }
     }));
+    if result.is_err() {
+        set_last_error("terminal_create panicked".to_string());
+    }
     result.unwrap_or(std::ptr::null_mut())
 }
 
@@ -618,6 +722,95 @@ pub unsafe extern "C" fn terminal_has_hung_up(
         *out = session.terminal.has_hung_up();
         TerminalStatus::Ok
     })
+}
+
+/// How the shell ended, and whether it has (PRD-mac §13).
+///
+/// # Safety
+/// `out` must point to a writable `TerminalChildStatus`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn terminal_child_status(
+    session: *mut TerminalSession,
+    out: *mut TerminalChildStatus,
+) -> TerminalStatus {
+    guard(|| {
+        let Some(session) = (unsafe { session_ref(session) }) else {
+            return TerminalStatus::NullHandle;
+        };
+        let Some(out) = (unsafe { out.as_mut() }) else {
+            return TerminalStatus::NullHandle;
+        };
+        let mut status = TerminalChildStatus {
+            hung_up: session.terminal.has_hung_up(),
+            ..TerminalChildStatus::default()
+        };
+        match session.terminal.child_outcome() {
+            Some(ChildOutcome::Code(code)) => {
+                status.exited = true;
+                status.exit_code = code;
+            }
+            Some(ChildOutcome::Signal(signal)) => {
+                status.exited = true;
+                status.signal = signal;
+            }
+            None => {}
+        }
+        *out = status;
+        TerminalStatus::Ok
+    })
+}
+
+/// Copy the most recent error message, for a Debug build to show on screen.
+///
+/// Uses the two-call sizing pattern of PRD §11: call with a zero capacity to
+/// learn the length, then again with room. Empty when nothing has gone wrong.
+/// Reading does not clear it — a redraw asks repeatedly while the message is
+/// still on screen.
+///
+/// # Safety
+/// `buf`, when non-null, must be writable for `cap` bytes, and `out_len` must
+/// point to a writable `u32`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn terminal_copy_last_error(
+    buf: *mut u8,
+    cap: u32,
+    out_len: *mut u32,
+) -> TerminalStatus {
+    guard(|| {
+        let Some(out_len) = (unsafe { out_len.as_mut() }) else {
+            return TerminalStatus::NullHandle;
+        };
+        let message = LAST_ERROR
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
+            .unwrap_or_default();
+        *out_len = message.len() as u32;
+        if cap < message.len() as u32 {
+            return TerminalStatus::BufferTooSmall;
+        }
+        if !message.is_empty() {
+            if buf.is_null() {
+                return TerminalStatus::InvalidArgument;
+            }
+            unsafe { std::ptr::copy_nonoverlapping(message.as_ptr(), buf, message.len()) };
+        }
+        TerminalStatus::Ok
+    })
+}
+
+/// Forget the most recent error, so a Debug overlay can be dismissed.
+///
+/// # Safety
+/// Takes no pointers and is safe to call from any thread; it is `unsafe` only
+/// to keep every entry point in this header declared the same way.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn terminal_clear_last_error() {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if let Ok(mut slot) = LAST_ERROR.lock() {
+            *slot = None;
+        }
+    }));
 }
 
 fn to_c_run(run: &terminal_core::prelude::Run) -> TerminalRun {
@@ -1107,6 +1300,174 @@ mod tests {
         assert!(
             unsafe { terminal_create(&missing) }.is_null(),
             "no such program"
+        );
+    }
+
+    fn child_status(handle: &Handle) -> TerminalChildStatus {
+        let mut status = TerminalChildStatus::default();
+        assert_eq!(
+            unsafe { terminal_child_status(handle.0, &mut status) },
+            TerminalStatus::Ok
+        );
+        status
+    }
+
+    #[test]
+    fn a_clean_exit_is_reported_differently_from_a_crash() {
+        // The frontend closes its window on the first and keeps it open on the
+        // second, so this is the whole of that rule (PRD-mac §13).
+        let (clean, _args) = spawn("exit 0");
+        wait_for("a clean exit", || hung_up(&clean));
+        let status = child_status(&clean);
+        assert!(status.hung_up && status.exited);
+        assert_eq!(status.exit_code, 0);
+        assert_eq!(status.signal, 0);
+
+        let (failed, _args) = spawn("exit 3");
+        wait_for("a failed exit", || hung_up(&failed));
+        let status = child_status(&failed);
+        assert!(status.exited);
+        assert_eq!(status.exit_code, 3);
+    }
+
+    #[test]
+    fn a_signalled_shell_reports_its_signal() {
+        let (handle, _args) = spawn("kill -TERM $$");
+        wait_for("the signal", || hung_up(&handle));
+        let status = child_status(&handle);
+        assert!(status.exited);
+        assert_eq!(status.signal, 15);
+        assert_eq!(status.exit_code, 0, "an exit code would read as success");
+    }
+
+    #[test]
+    fn a_running_shell_has_not_hung_up_and_has_not_exited() {
+        let (handle, _args) = spawn("sleep 30");
+        let status = child_status(&handle);
+        assert!(!status.hung_up);
+        assert!(!status.exited);
+    }
+
+    #[test]
+    fn a_null_out_parameter_for_the_child_status_is_caught() {
+        let (handle, _args) = spawn("sleep 30");
+        assert_eq!(
+            unsafe { terminal_child_status(handle.0, std::ptr::null_mut()) },
+            TerminalStatus::NullHandle
+        );
+        let mut status = TerminalChildStatus::default();
+        assert_eq!(
+            unsafe { terminal_child_status(std::ptr::null_mut(), &mut status) },
+            TerminalStatus::NullHandle
+        );
+    }
+
+    /// The last-error slot and the panic hook are process-global, so the tests
+    /// that touch them take a turn rather than racing each other.
+    static GLOBAL_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn serialised() -> std::sync::MutexGuard<'static, ()> {
+        GLOBAL_STATE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Read the last error with the two-call pattern, as a frontend would.
+    fn last_error() -> String {
+        let mut len = 0u32;
+        let status = unsafe { terminal_copy_last_error(std::ptr::null_mut(), 0, &mut len) };
+        if len == 0 {
+            assert_eq!(status, TerminalStatus::Ok);
+            return String::new();
+        }
+        assert_eq!(status, TerminalStatus::BufferTooSmall);
+        let mut buf = vec![0u8; len as usize];
+        assert_eq!(
+            unsafe { terminal_copy_last_error(buf.as_mut_ptr(), len, &mut len) },
+            TerminalStatus::Ok
+        );
+        String::from_utf8(buf).expect("utf-8")
+    }
+
+    #[test]
+    fn a_caught_panic_leaves_a_message_worth_reading() {
+        let _turn = serialised();
+        // "Panicked" alone is the least debuggable state the app can be in, so
+        // the payload and the location are kept for a Debug build to draw.
+        unsafe { terminal_clear_last_error() };
+        install_panic_hook();
+        let previous = std::panic::take_hook();
+        install_panic_hook_for_test();
+
+        let status = guard(|| panic!("a deliberate test panic"));
+        assert_eq!(status, TerminalStatus::Panicked);
+
+        std::panic::set_hook(previous);
+        let message = last_error();
+        assert!(message.contains("a deliberate test panic"), "{message}");
+        assert!(
+            message.contains("lib.rs"),
+            "the location is the useful half: {message}"
+        );
+    }
+
+    /// The real hook is installed once per process by `terminal_create`; this
+    /// test does not create a session, so it installs the same one directly.
+    fn install_panic_hook_for_test() {
+        std::panic::set_hook(Box::new(|info| {
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_else(|| "unknown location".to_string());
+            if let Ok(mut slot) = PANIC_LOCATION.lock() {
+                *slot = Some(location);
+            }
+        }));
+    }
+
+    #[test]
+    fn a_failed_spawn_says_why() {
+        let _turn = serialised();
+        unsafe { terminal_clear_last_error() };
+        let mut args = Vec::new();
+        let mut missing = config("true", &mut args);
+        missing.program = bytes("/nonexistent/shell");
+        assert!(unsafe { terminal_create(&missing) }.is_null());
+        let message = last_error();
+        assert!(message.contains("terminal_create"), "{message}");
+    }
+
+    #[test]
+    fn clearing_the_last_error_empties_it() {
+        let _turn = serialised();
+        unsafe { terminal_clear_last_error() };
+        assert!(last_error().is_empty());
+    }
+
+    #[test]
+    fn the_exported_attribute_bits_match_the_engine() {
+        // The header is the frontend's only source for these. If the engine
+        // renumbered a flag and this crate did not, every styled run would draw
+        // with the wrong decoration and nothing would say so.
+        use terminal_core::prelude::{CellAttrs, Color};
+        assert_eq!(TERMINAL_ATTR_BOLD, CellAttrs::BOLD.bits());
+        assert_eq!(TERMINAL_ATTR_DIM, CellAttrs::DIM.bits());
+        assert_eq!(TERMINAL_ATTR_ITALIC, CellAttrs::ITALIC.bits());
+        assert_eq!(TERMINAL_ATTR_UNDERLINE, CellAttrs::UNDERLINE.bits());
+        assert_eq!(TERMINAL_ATTR_BLINK, CellAttrs::BLINK.bits());
+        assert_eq!(TERMINAL_ATTR_REVERSE, CellAttrs::REVERSE.bits());
+        assert_eq!(TERMINAL_ATTR_HIDDEN, CellAttrs::HIDDEN.bits());
+        assert_eq!(TERMINAL_ATTR_STRIKETHROUGH, CellAttrs::STRIKETHROUGH.bits());
+
+        assert_eq!(
+            Color::Default.pack() >> TERMINAL_COLOR_TAG_SHIFT,
+            TERMINAL_COLOR_DEFAULT
+        );
+        assert_eq!(
+            Color::Indexed(7).pack() >> TERMINAL_COLOR_TAG_SHIFT,
+            TERMINAL_COLOR_INDEXED
+        );
+        assert_eq!(
+            Color::Rgb(1, 2, 3).pack() >> TERMINAL_COLOR_TAG_SHIFT,
+            TERMINAL_COLOR_RGB
         );
     }
 

@@ -19,6 +19,38 @@
 #define TERMINAL_MOD_CTRL (1 << 2)
 
 /**
+ * The bits of [`TerminalRun::attrs`]. They mirror the engine's `CellAttrs`
+ * exactly — a test in this crate fails if the two ever drift.
+ */
+#define TERMINAL_ATTR_BOLD (1 << 0)
+
+#define TERMINAL_ATTR_DIM (1 << 1)
+
+#define TERMINAL_ATTR_ITALIC (1 << 2)
+
+#define TERMINAL_ATTR_UNDERLINE (1 << 3)
+
+#define TERMINAL_ATTR_BLINK (1 << 4)
+
+#define TERMINAL_ATTR_REVERSE (1 << 5)
+
+#define TERMINAL_ATTR_HIDDEN (1 << 6)
+
+#define TERMINAL_ATTR_STRIKETHROUGH (1 << 7)
+
+/**
+ * The tags in the top byte of [`TerminalRun::fg`] and `bg`: how a frontend
+ * tells "the terminal default" from a colour that merely looks like one.
+ */
+#define TERMINAL_COLOR_TAG_SHIFT 24
+
+#define TERMINAL_COLOR_DEFAULT 0
+
+#define TERMINAL_COLOR_INDEXED 1
+
+#define TERMINAL_COLOR_RGB 2
+
+/**
  * The result of a fallible call. Out-parameters carry results; the return
  * value carries status (PRD §12).
  */
@@ -245,6 +277,34 @@ typedef struct TerminalFrameInfo {
     bool cursor_visible;
 } TerminalFrameInfo;
 
+/**
+ * How the shell ended, and whether it has.
+ *
+ * A frontend closes its window on a clean exit and keeps it open on anything
+ * else, so the three cases have to be distinguishable: still running, ended
+ * cleanly, ended badly. `hung_up` without `exited` is the third kind of
+ * trouble — the reader thread stopped for its own reasons and the shell's fate
+ * is unknown, which must never be read as success.
+ */
+typedef struct TerminalChildStatus {
+    /**
+     * The reader thread has stopped: there is nothing more to display.
+     */
+    bool hung_up;
+    /**
+     * The shell was reaped and the fields below mean something.
+     */
+    bool exited;
+    /**
+     * Its exit status, when it was not killed. Zero is an ordinary end.
+     */
+    int32_t exit_code;
+    /**
+     * The signal that killed it, or zero.
+     */
+    int32_t signal;
+} TerminalChildStatus;
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -349,6 +409,38 @@ TerminalStatus terminal_copy_title(struct TerminalSession *session,
  * `out` must point to a writable `bool`.
  */
 TerminalStatus terminal_has_hung_up(struct TerminalSession *session, bool *out);
+
+/**
+ * How the shell ended, and whether it has (PRD-mac §13).
+ *
+ * # Safety
+ * `out` must point to a writable `TerminalChildStatus`.
+ */
+TerminalStatus terminal_child_status(struct TerminalSession *session,
+                                     struct TerminalChildStatus *out);
+
+/**
+ * Copy the most recent error message, for a Debug build to show on screen.
+ *
+ * Uses the two-call sizing pattern of PRD §11: call with a zero capacity to
+ * learn the length, then again with room. Empty when nothing has gone wrong.
+ * Reading does not clear it — a redraw asks repeatedly while the message is
+ * still on screen.
+ *
+ * # Safety
+ * `buf`, when non-null, must be writable for `cap` bytes, and `out_len` must
+ * point to a writable `u32`.
+ */
+TerminalStatus terminal_copy_last_error(uint8_t *buf, uint32_t cap, uint32_t *out_len);
+
+/**
+ * Forget the most recent error, so a Debug overlay can be dismissed.
+ *
+ * # Safety
+ * Takes no pointers and is safe to call from any thread; it is `unsafe` only
+ * to keep every entry point in this header declared the same way.
+ */
+void terminal_clear_last_error(void);
 
 #ifdef __cplusplus
 }  // extern "C"
