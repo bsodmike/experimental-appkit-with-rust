@@ -456,6 +456,14 @@ failing loudly, which makes it an expensive omission to debug later.
 The API must therefore make replies impossible to ignore — feeding input returns
 the bytes owed, rather than hiding them behind a getter nobody calls.
 
+**Implemented.** `Screen::advance` returns the owed bytes and is `#[must_use]`,
+so dropping them is deliberate. The queue behind it is capped and overflow is
+dropped: a program can ask faster than anyone drains, and an unbounded queue
+would be a memory leak driven by untrusted output. Answers, and the rest of the
+VT coverage this slice added — scrolling margins, DECSC/DECRC, DEC private
+modes, the alternate screen, OSC titles — are recorded in
+`docs/adrs/2026-08-28.adr-vt-coverage-and-alternate-screen.md`.
+
 ---
 
 ## 10. The read path, and why the obvious API is unsound
@@ -998,7 +1006,7 @@ resolved them; full rationale is in `docs/adrs/2026-08-27.adr-logical-line-buffe
 | 18 | Scrollback representation | **Packed UTF-8 text + attribute runs** (`{byte_start, byte_len, cols, fg, bg, attrs}`), immutable, converted from grid rows on eviction. Hits the low end of #13's budget and is already the §10 render-run shape. |
 | 19 | Active-grid cell content | **`compact_str::CompactString`**, not heap `String` — UTF-8, but no per-cell allocation for real clusters. Reverses the earlier `String` choice. |
 | 20 | Internal offset unit | **Byte offsets into the packed UTF-8, grapheme-aligned**, for both triples and anchors; §16.2's `char_offset` becomes a byte offset. Columns are computed on demand, never stored. |
-| 21 | Primary-buffer type | **A dedicated `Screen` type** (row-oriented, per-row `line_id`/`wrapped`, owns cursor + scrollback). The dumb `Grid` stays the alternate-screen / scratch rectangle. |
+| 21 | Primary-buffer type | **A dedicated `Screen` type** (row-oriented, per-row `line_id`/`wrapped`, owns cursor + scrollback). The dumb `Grid` stays the scratch rectangle. *Amended 2026-08-28:* the alternate screen is a second `Screen` buffer swapped in, not a `Grid` — that way it inherits the whole write path (wide characters, combining marks, margins, line editing) instead of needing it reimplemented. See the alternate-screen ADR. |
 | 22 | Scrollback cap | **Dual: logical-line count (default 10k, max 100k) + total-bytes safety cap.** Whole oldest lines evicted from a `VecDeque`; never split or truncated. A count cap alone is not a memory bound because a logical line is unbounded. |
 | 23 | Wrap-point cache | **Per-line `{width, row_starts}`, `row_starts` stored inline**, invalidated by comparison to a single global width (O(1) resize), filled lazily + by the §16.5 thread, scrollback only. This is the concrete lazy-reflow mechanism. |
 | 24 | Boundary straddle | **Allow split, rejoin by `line_id`.** Rows freeze incrementally as they scroll off (active grid stays a clean rectangle); at most one line is split head/tail and reconstructed by concatenation at reflow. Frozen head byte-length tracked for split-line anchors. |
