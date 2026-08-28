@@ -340,6 +340,13 @@ flag that is already set and posts nothing. The main thread always draws the
 bursts are absorbed by the reader thread at full speed while the UI repaints at
 whatever rate it can sustain.
 
+**Implemented.** `terminal-core`'s `Session` is the mutex and the coalesced
+wake-up; `terminal-pty`'s `Terminal` is the pty, the shell and the `pty-reader`
+thread that parses on the far side of it. The details — why the callback fires
+outside the lock, why the dirty flag is cleared before the copy rather than
+after, why the pty is split into two handles, and how the reader thread is made
+joinable — are in `docs/adrs/2026-08-28.adr-session-pty-and-reader-thread.md`.
+
 ### Shutdown
 
 Destroying a session must be ordered, or a background thread outlives the memory
@@ -1078,11 +1085,14 @@ message or a conversation is a design that has already started to rot.
 **One commit per increment**, with a conventional message and a `Co-Authored-By`
 trailer, so the history reads as a sequence of self-contained, verified steps.
 
-**Crate layout.** `terminal-core` is the pure engine and the only crate today.
-The FFI layer — the `staticlib` plus the cbindgen-generated header of §14 —
-becomes a separate `terminal-ffi` crate when the boundary is first crossed, so
-that the engine crate never gains a build step or a dependency that would
-compromise its headless testability.
+**Crate layout.** `terminal-core` is the pure engine: no platform dependency,
+testable with nothing but a compiler. `terminal-pty` (added 2026-08-28) holds
+the pseudo-terminal, the child process and the reader thread — Rust's by §5, but
+POSIX, so kept out of the engine; it depends on `terminal-core` and never the
+reverse. The FFI layer — the `staticlib` plus the cbindgen-generated header of
+§14 — becomes a separate `terminal-ffi` crate when the boundary is first
+crossed, so that the engine crate never gains a build step or a dependency that
+would compromise its headless testability.
 
 ---
 
