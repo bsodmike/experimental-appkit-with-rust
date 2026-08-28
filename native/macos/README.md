@@ -14,6 +14,10 @@ just test        # Rust tests, glue tests, then the Xcode tests
 just run         # build everything and launch, with logs in this terminal
 ```
 
+Xcode has to be *selected*, not merely installed: a Mac with only the Command
+Line Tools has a `/usr/bin/xcodebuild` that refuses to run. `just doctor` says
+so plainly, and `just check-xcode` prints the one command that fixes it.
+
 No Apple Developer account is needed for any of that. The app is signed
 ad-hoc, which is valid on this Mac and meaningless anywhere else — which is all
 a development build needs.
@@ -24,6 +28,7 @@ a development build needs.
 |---|---|
 | `just` | List everything |
 | `just bootstrap` | Install only what is missing. `just` is checked against both cargo and Homebrew before anything happens, and installed with cargo when cargo is present — two copies on `PATH` means the winner is decided by ordering |
+| `just check-xcode` | Whether `xcodebuild` can actually run, and what to do when it cannot |
 | `just build` | Cargo, then XcodeGen, then `xcodebuild` (Debug) |
 | `just run` | Build, then run the binary directly so its log output lands here |
 | `just watch` | Rebuild and relaunch on any change to `.rs`, `.cpp`, `.mm`, `.h`, `.yml` |
@@ -95,6 +100,16 @@ prints the error immediately before dying, and taking that off screen is the
 least helpful possible moment.
 
 ## When it does not build
+
+**`tool 'xcodebuild' requires Xcode`.** The Command Line Tools are selected
+instead of Xcode itself — `/usr/bin/xcodebuild` is a shim that exists either
+way, which is why it looks installed. `just doctor` reports it and `just
+check-xcode` prints the fix:
+
+```sh
+sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+sudo xcodebuild -license accept
+```
 
 **`cargo: command not found` during an Xcode build.** Xcode's build phases do
 not run your login shell, so they do not have your `PATH`. The pre-build script

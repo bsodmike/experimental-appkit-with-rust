@@ -29,7 +29,7 @@ doctor:
         printf '%-14s %s\n' "macos" "$(sw_vers -productVersion)"
         printf '%-14s %s\n' "chip" "$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown)"
     fi
-    for tool in cargo rustc just xcodegen xcodebuild watchexec; do
+    for tool in cargo rustc just xcodegen watchexec; do
         if command -v "$tool" >/dev/null 2>&1; then
             # The path matters as much as the version: two copies of a tool on
             # PATH is a confusing afternoon, and this is where it shows up.
@@ -40,8 +40,17 @@ doctor:
         fi
     done
     printf '%-14s %s\n' "c++" "$({{cxx}} --version 2>&1 | head -1)"
-    if command -v xcodebuild >/dev/null 2>&1; then
+
+    # xcodebuild needs running, not finding: /usr/bin/xcodebuild is a shim that
+    # exists on every Mac and errors unless a full Xcode is selected.
+    if xcodebuild -version >/dev/null 2>&1; then
+        printf '%-14s %-28s %s\n' "xcodebuild" "$(xcodebuild -version | head -1)" \
+            "$(xcode-select -p 2>/dev/null)"
         printf '%-14s %s\n' "signing" "$(security find-identity -v -p codesigning 2>/dev/null | grep -c 'Developer ID Application') Developer ID identities"
+    elif command -v xcodebuild >/dev/null 2>&1; then
+        printf '%-14s %s\n' "xcodebuild" "NOT USABLE -- run: just check-xcode"
+    else
+        printf '%-14s %s\n' "xcodebuild" "MISSING (not a Mac?)"
     fi
 
 # Install the tools the Mac side needs, and only the ones that are missing.
@@ -107,6 +116,35 @@ native-libs:
 
 # ---------------------------------------------------------------- build
 
+# Fail early, and usefully, when xcodebuild cannot actually run.
+#
+# `command -v xcodebuild` is not a test for this: /usr/bin/xcodebuild is a shim
+# present on every Mac, and it errors out unless xcode-select points at a full
+# Xcode rather than at the Command Line Tools. Probing by running it is the only
+# probe that means anything.
+check-xcode:
+    #!/usr/bin/env sh
+    set -eu
+    if xcodebuild -version >/dev/null 2>&1; then
+        exit 0
+    fi
+    active=$(xcode-select -p 2>/dev/null || echo "nothing")
+    echo "xcodebuild cannot run. xcode-select points at: $active" >&2
+    installed=$(ls -d /Applications/Xcode*.app 2>/dev/null | head -1 || true)
+    if [ -n "$installed" ]; then
+        echo "" >&2
+        echo "Xcode is installed at $installed but is not selected. Fix it with:" >&2
+        echo "" >&2
+        echo "    sudo xcode-select -s $installed/Contents/Developer" >&2
+        echo "    sudo xcodebuild -license accept" >&2
+    else
+        echo "" >&2
+        echo "Xcode does not appear to be installed. The Command Line Tools have" >&2
+        echo "clang and the SDK, but xcodebuild, XCTest and Instruments need the" >&2
+        echo "full Xcode from the App Store. See native/macos/README.md." >&2
+    fi
+    exit 1
+
 # Generate the Xcode project from project.yml. The .xcodeproj is disposable.
 generate:
     #!/usr/bin/env sh
@@ -124,7 +162,7 @@ generate:
     cd {{mac_dir}} && xcodegen generate --quiet
 
 # Build the app (Debug). Cargo runs as a build phase, so this works from clean.
-build: generate
+build: check-xcode generate
     xcodebuild -project {{project}} -scheme {{app}} -configuration Debug build \
         CURRENT_PROJECT_VERSION="$(git rev-list --count HEAD)" | tail -5
 
@@ -144,7 +182,7 @@ xcode: generate
 
 # Everything that can be tested on this machine.
 test: test-rust test-glue
-    @if command -v xcodebuild >/dev/null 2>&1; then just test-mac; else echo "skipping test-mac: no Xcode"; fi
+    @if xcodebuild -version >/dev/null 2>&1; then just test-mac; else echo "skipping test-mac: xcodebuild cannot run -- see: just check-xcode"; fi
 
 # The Rust workspace.
 test-rust:
@@ -164,7 +202,7 @@ test-glue: (rust)
     ./target/glue-tests
 
 # The AppKit tests, which need a Mac.
-test-mac: generate
+test-mac: check-xcode generate
     xcodebuild -project {{project}} -scheme {{app}} test | tail -5
 
 # The C program that drives the whole boundary (PRD §14).
@@ -174,7 +212,7 @@ smoke:
 # ---------------------------------------------------------------- ship
 
 # A Release build, signed ad-hoc: it runs on this Mac and nowhere else.
-release: generate
+release: check-xcode generate
     cargo build -p terminal-ffi --release
     xcodebuild -project {{project}} -scheme {{app}} -configuration Release build \
         CURRENT_PROJECT_VERSION="$(git rev-list --count HEAD)" | tail -5
@@ -182,7 +220,7 @@ release: generate
 
 # A Release build for both architectures. Needs the second Rust target:
 #     rustup target add x86_64-apple-darwin
-release-universal: generate
+release-universal: check-xcode generate
     #!/usr/bin/env sh
     set -eu
     cargo build -p terminal-ffi --release --target aarch64-apple-darwin
@@ -198,7 +236,7 @@ release-universal: generate
 
 # A Release build signed with a Developer ID certificate.
 # Set SIGN_IDENTITY and DEV_TEAM in native/macos/Local.xcconfig first.
-release-signed: generate
+release-signed: check-xcode generate
     #!/usr/bin/env sh
     set -eu
     if ! grep -q "Developer ID" {{mac_dir}}/Local.xcconfig 2>/dev/null; then
