@@ -46,21 +46,48 @@ doctor:
 
 # Install the tools the Mac side needs, and only the ones that are missing.
 #
-# `just` is deliberately not in the list: if this recipe is running then just is
-# already installed, and brewing it again would put a second copy on PATH with
-# the winner decided by ordering. A cargo-installed just is just as good.
+# `just` is available from both cargo and Homebrew, so both are asked before
+# anything is installed: two copies on PATH means the winner is decided by
+# ordering, which is a confusing afternoon. Cargo is preferred when it is
+# present, since a Rust project's toolchain is already there.
 bootstrap:
     #!/usr/bin/env sh
     set -eu
+
+    have() { command -v "$1" >/dev/null 2>&1; }
+    cargo_owns() { have cargo && cargo install --list 2>/dev/null | grep -q "^$1 v"; }
+    brew_owns() { have brew && brew list --formula "$1" >/dev/null 2>&1; }
+
+    if cargo_owns just && brew_owns just; then
+        echo "just: installed by BOTH cargo and homebrew; PATH picks $(command -v just)" >&2
+        echo "      drop one:  cargo uninstall just   or   brew uninstall just" >&2
+    elif cargo_owns just; then
+        echo "just: cargo owns it, leaving it alone"
+    elif brew_owns just; then
+        echo "just: homebrew owns it, leaving it alone"
+    elif have just; then
+        echo "just: already at $(command -v just), leaving it alone"
+    elif have cargo; then
+        echo "installing just with cargo"
+        cargo install just
+    elif have brew; then
+        echo "installing just with homebrew"
+        brew install just
+    else
+        echo "just is missing, and neither cargo nor brew is here to install it" >&2
+        exit 1
+    fi
+
+    # xcodegen is a Swift package and watchexec is what it is: Homebrew for both.
     missing=""
     for tool in xcodegen watchexec; do
-        command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+        have "$tool" || missing="$missing $tool"
     done
     if [ -z "$missing" ]; then
-        echo "everything is already installed"
+        echo "everything else is already installed"
         exit 0
     fi
-    if ! command -v brew >/dev/null 2>&1; then
+    if ! have brew; then
         echo "Homebrew is not installed, and these are missing:$missing" >&2
         echo "See https://brew.sh, or install them however you prefer." >&2
         exit 1

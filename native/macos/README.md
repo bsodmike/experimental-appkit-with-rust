@@ -9,7 +9,7 @@ it. This file is only about how to build and run the thing.
 
 ```sh
 just doctor      # what is installed, what is missing, what this machine is
-just bootstrap   # brew install whatever is missing (not just itself)
+just bootstrap   # install whatever is missing, without duplicating it
 just test        # Rust tests, glue tests, then the Xcode tests
 just run         # build everything and launch, with logs in this terminal
 ```
@@ -23,7 +23,7 @@ a development build needs.
 | Command | What it does |
 |---|---|
 | `just` | List everything |
-| `just bootstrap` | Install only the missing tools. It never installs `just` — you already have it, and a second copy on `PATH` is a confusing afternoon |
+| `just bootstrap` | Install only what is missing. `just` is checked against both cargo and Homebrew before anything happens, and installed with cargo when cargo is present — two copies on `PATH` means the winner is decided by ordering |
 | `just build` | Cargo, then XcodeGen, then `xcodebuild` (Debug) |
 | `just run` | Build, then run the binary directly so its log output lands here |
 | `just watch` | Rebuild and relaunch on any change to `.rs`, `.cpp`, `.mm`, `.h`, `.yml` |
