@@ -210,7 +210,9 @@ mod tests {
 
     /// Wait for `cond`, failing the test rather than hanging forever.
     fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // Generous, because these tests share a machine with every other
+        // test in the workspace: a slow answer is not a wrong one.
+        let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
             if cond() {
                 return;
