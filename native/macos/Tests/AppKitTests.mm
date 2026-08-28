@@ -11,6 +11,7 @@
 #import "TerminalView.h"
 
 #include "Config.h"
+#include "ConfigFile.h"
 #include "Metrics.h"
 
 @interface AppKitTests : XCTestCase
@@ -73,6 +74,12 @@
     [view setFrameSize:NSMakeSize(320, 200)];
     [view setFrameSize:NSMakeSize(900, 600)];
     [view shutdown];
+}
+
+- (void)testReloadingTheConfigDoesNotDisturbAViewWithNoSession {
+    TerminalView *view = [[TerminalView alloc] initWithFrame:NSMakeRect(0, 0, 640, 400)];
+    [view reloadConfig];
+    XCTAssertGreaterThan([view preferredSize].width, 0);
 }
 
 - (void)testTheTitleIsAlwaysSomething {

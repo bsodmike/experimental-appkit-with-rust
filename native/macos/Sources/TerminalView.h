@@ -25,6 +25,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// The window title the shell has asked for, plus any exit marker.
 - (NSString *)windowTitle;
 
+/// Re-read ~/.config/crustty/config and apply the font, colours and keyboard
+/// mode to the running session. The shell and the opening size cannot change
+/// under a session that already exists.
+- (void)reloadConfig;
+
 /// Font size, which Cmd-+ and Cmd-- walk.
 - (void)zoomBy:(int)steps;
 - (void)resetZoom;

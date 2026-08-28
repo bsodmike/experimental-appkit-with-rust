@@ -1,18 +1,23 @@
 // The frontend's configuration, validated.
 //
-// PRD-mac §8 and §13. The values arrive from NSUserDefaults — which is why you
-// can change the font with `defaults write` and no rebuild — but nothing
-// arriving from outside is trusted: a font size of 0 or 10000 is a window that
-// cannot be used, and it should be clamped rather than obeyed.
+// PRD-mac §8. Everything the frontend can be configured by comes from one file
+// in Ghostty's format (see ConfigFile.h); nothing comes from NSUserDefaults any
+// more, so there is one place to look and one place to edit.
 //
-// The reading of NSUserDefaults is three lines in the view. The deciding is
-// here, where it is tested.
+// Nothing arriving from that file is trusted. A font size of 0 or 10000 is a
+// window that cannot be used, a palette index of 900 is a typo, and an unknown
+// key is usually a misspelling of a real one. Each is reported against its line
+// number and everything else in the file still applies -- a config that fails
+// as a whole because of one bad line is a config that is painful to edit.
 
 #pragma once
 
 #include <cstdint>
 #include <string>
 #include <vector>
+
+#include "ConfigFile.h"
+#include "Palette.h"
 
 namespace glue {
 
@@ -25,16 +30,6 @@ inline constexpr double kDefaultFontSize = 13.0;
 inline constexpr std::uint16_t kDefaultRows = 24;
 inline constexpr std::uint16_t kDefaultCols = 80;
 
-/// What NSUserDefaults returned, before anyone has decided whether to believe
-/// it. Null and zero mean "not set", which is different from "set to nothing".
-struct Defaults {
-    const char* font_name = nullptr;
-    double font_size = 0.0;
-    const char* shell = nullptr;
-    /// -1 for unset; 0 and 1 for the two answers.
-    int option_is_meta = -1;
-};
-
 /// The settings the app actually runs with.
 struct Config {
     /// Empty means the system's monospaced font, which is always present.
@@ -45,14 +40,20 @@ struct Config {
     bool option_is_meta = true;
     std::uint16_t rows = kDefaultRows;
     std::uint16_t cols = kDefaultCols;
+    Theme theme;
+
+    /// What was wrong with the file, in the order it was wrong. Shown to the
+    /// user in every build: a typo is theirs to fix, and a setting that
+    /// silently fails to apply is worse than a line of red text.
+    std::vector<Diagnostic> diagnostics;
 };
 
-/// Resolve the defaults into settings, filling in what was not set and
-/// clamping what was set unreasonably.
+/// Turn parsed entries into settings.
 ///
-/// `env_shell` is `$SHELL`, or null. A login shell is what rebuilds `PATH` when
-/// the app was launched from Finder, so `-l` is not optional.
-Config resolve(const Defaults& defaults, const char* env_shell);
+/// `env_shell` is `$SHELL`, or null. Unset keys keep their defaults, and the
+/// shell always runs as a login shell unless the file says otherwise: an app
+/// bundle inherits a stub `PATH`, and only the login profile rebuilds it.
+Config resolve(const ParsedFile& file, const char* env_shell);
 
 /// A font size `steps` larger (or smaller), clamped. Cmd-+ and Cmd-- walk this.
 double zoomed(double size, int steps);

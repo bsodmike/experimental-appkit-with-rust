@@ -5,10 +5,13 @@
 // AppKit — see AppKitTests.mm, which is deliberately much smaller.
 
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <thread>
 
 #include "../Glue/Config.h"
+#include "../Glue/ConfigFile.h"
 #include "../Glue/Diagnostics.h"
 #include "../Glue/FrameBuffers.h"
 #include "../Glue/KeyMap.h"
@@ -264,63 +267,247 @@ TEST(codepoints_are_decoded_from_utf8) {
     CHECK_EQ(first_codepoint("\x80", 1), 0u);                 // a continuation byte
 }
 
+// ------------------------------------------------------------ ConfigFile
+
+TEST(a_setting_is_a_key_an_equals_and_a_value) {
+    const ParsedFile parsed = parse("font-size = 15\n");
+    CHECK_EQ(parsed.entries.size(), 1u);
+    CHECK_EQ(parsed.entries[0].key, std::string("font-size"));
+    CHECK_EQ(parsed.entries[0].value, std::string("15"));
+    CHECK_EQ(parsed.entries[0].line, 1);
+    CHECK(parsed.diagnostics.empty());
+}
+
+TEST(whitespace_around_a_setting_is_not_part_of_it) {
+    const ParsedFile parsed = parse("   font-family   =   SF Mono   \n");
+    CHECK_EQ(parsed.entries[0].key, std::string("font-family"));
+    // Internal spaces survive: a font name is allowed to have them.
+    CHECK_EQ(parsed.entries[0].value, std::string("SF Mono"));
+}
+
+TEST(a_hash_starts_a_comment_only_at_the_start_of_a_line) {
+    // The whole reason for the rule: every colour in the file begins with '#',
+    // and a trailing-comment rule would silently eat them.
+    const ParsedFile parsed = parse("# a comment\n   # indented comment\nbackground = #1e1e1e\n");
+    CHECK_EQ(parsed.entries.size(), 1u);
+    CHECK_EQ(parsed.entries[0].value, std::string("#1e1e1e"));
+    CHECK_EQ(parsed.entries[0].line, 3);
+    CHECK(parsed.diagnostics.empty());
+}
+
+TEST(blank_lines_and_a_missing_final_newline_are_fine) {
+    const ParsedFile parsed = parse("\n\nfont-size = 12\n\nshell = /bin/sh");
+    CHECK_EQ(parsed.entries.size(), 2u);
+    CHECK_EQ(parsed.entries[0].line, 3);
+    CHECK_EQ(parsed.entries[1].line, 5);
+}
+
+TEST(a_file_edited_on_another_machine_still_parses) {
+    const ParsedFile parsed = parse("font-size = 14\r\nbackground = #000000\r\n");
+    CHECK_EQ(parsed.entries.size(), 2u);
+    CHECK_EQ(parsed.entries[0].value, std::string("14"));
+    CHECK_EQ(parsed.entries[1].value, std::string("#000000"));
+}
+
+TEST(a_line_that_is_not_a_setting_is_reported_with_its_number) {
+    const ParsedFile parsed = parse("font-size = 13\nthis is not a setting\n= orphaned\n");
+    CHECK_EQ(parsed.entries.size(), 1u);
+    CHECK_EQ(parsed.diagnostics.size(), 2u);
+    CHECK_EQ(parsed.diagnostics[0].line, 2);
+    CHECK_EQ(parsed.diagnostics[1].line, 3);
+}
+
+TEST(an_empty_value_is_a_value) {
+    const ParsedFile parsed = parse("font-family =\n");
+    CHECK_EQ(parsed.entries.size(), 1u);
+    CHECK(parsed.entries[0].value.empty());
+    CHECK(parsed.diagnostics.empty());
+}
+
+TEST(the_config_path_follows_xdg_then_home) {
+    CHECK_EQ(config_path("/xdg", "/home/me"), std::string("/xdg/crustty/config"));
+    CHECK_EQ(config_path(nullptr, "/home/me"), std::string("/home/me/.config/crustty/config"));
+    CHECK_EQ(config_path("", "/home/me"), std::string("/home/me/.config/crustty/config"));
+    CHECK(config_path(nullptr, nullptr).empty());
+}
+
+TEST(a_missing_file_is_all_defaults_and_not_an_error) {
+    const ParsedFile parsed = load("/nonexistent/crustty/config");
+    CHECK(parsed.entries.empty());
+    CHECK(parsed.diagnostics.empty());
+}
+
+TEST(a_real_file_loads_from_disk) {
+    const std::string path = std::string(std::getenv("TMPDIR") != nullptr ? std::getenv("TMPDIR")
+                                                                         : "/tmp") +
+                             "/crustty-test-config";
+    FILE* file = std::fopen(path.c_str(), "w");
+    CHECK(file != nullptr);
+    std::fputs("# written by a test\nfont-size = 17\nbackground = #123456\n", file);
+    std::fclose(file);
+
+    const ParsedFile parsed = load(path);
+    CHECK_EQ(parsed.entries.size(), 2u);
+    const Config config = resolve(parsed, nullptr);
+    CHECK_EQ(config.font_size, 17.0);
+    CHECK(config.theme.background == (Rgba{0x12, 0x34, 0x56, 255}));
+    std::remove(path.c_str());
+}
+
+// ---------------------------------------------------------------- Colours
+
+TEST(colours_are_read_in_both_lengths) {
+    Rgba color{};
+    CHECK(parse_color("#1e1e1e", color));
+    CHECK(color == (Rgba{0x1e, 0x1e, 0x1e, 255}));
+    CHECK(parse_color("#ABCDEF", color));
+    CHECK(color == (Rgba{0xab, 0xcd, 0xef, 255}));
+    // #abc is #aabbcc, as everywhere else.
+    CHECK(parse_color("#f0a", color));
+    CHECK(color == (Rgba{0xff, 0x00, 0xaa, 255}));
+}
+
+TEST(anything_that_is_not_a_colour_is_refused_rather_than_guessed) {
+    Rgba color{0x11, 0x22, 0x33, 255};
+    const Rgba untouched = color;
+    for (const char* bad : {"1e1e1e", "#12345", "#", "#gg0000", "", "red", "#1234567"}) {
+        CHECK_MSG(!parse_color(bad, color), bad);
+    }
+    CHECK_MSG(color == untouched, "a failed parse must not half-write the colour");
+}
+
 // ---------------------------------------------------------------- Config
 
-TEST(unset_defaults_produce_the_documented_fallbacks) {
-    const Config config = resolve(Defaults{}, nullptr);
+namespace {
+Config config_from(const std::string& text, const char* env_shell = nullptr) {
+    return resolve(parse(text), env_shell);
+}
+}  // namespace
+
+TEST(no_config_file_produces_the_documented_defaults) {
+    const Config config = config_from("");
     CHECK(config.font_name.empty());  // the system monospaced font
     CHECK_EQ(config.font_size, kDefaultFontSize);
     CHECK_EQ(config.shell, std::string("/bin/zsh"));
     CHECK(config.option_is_meta);
     CHECK_EQ(config.rows, kDefaultRows);
     CHECK_EQ(config.cols, kDefaultCols);
+    CHECK(config.diagnostics.empty());
+    CHECK(config.theme.background == default_theme().background);
 }
 
 TEST(the_shell_comes_from_the_environment_before_the_fallback) {
-    CHECK_EQ(resolve(Defaults{}, "/bin/fish").shell, std::string("/bin/fish"));
-    CHECK_EQ(resolve(Defaults{}, "").shell, std::string("/bin/zsh"));
-
-    Defaults preference;
-    preference.shell = "/opt/homebrew/bin/fish";
-    CHECK_MSG(resolve(preference, "/bin/zsh").shell == "/opt/homebrew/bin/fish",
-              "an explicit preference beats the environment");
+    CHECK_EQ(config_from("", "/bin/fish").shell, std::string("/bin/fish"));
+    CHECK_EQ(config_from("", "").shell, std::string("/bin/zsh"));
+    CHECK_MSG(config_from("shell = /opt/homebrew/bin/fish", "/bin/zsh").shell ==
+                  "/opt/homebrew/bin/fish",
+              "the file beats the environment");
 }
 
-TEST(the_shell_is_always_a_login_shell) {
+TEST(the_shell_is_a_login_shell_unless_the_file_says_otherwise) {
     // An app bundle inherits a stub PATH; only the login profile rebuilds it.
-    const Config config = resolve(Defaults{}, nullptr);
-    CHECK_EQ(config.shell_args.size(), 1u);
-    CHECK_EQ(config.shell_args[0], std::string("-l"));
+    const Config defaulted = config_from("");
+    CHECK_EQ(defaulted.shell_args.size(), 1u);
+    CHECK_EQ(defaulted.shell_args[0], std::string("-l"));
+
+    const Config overridden = config_from("shell-arg = -i\nshell-arg = -c\nshell-arg = ls\n");
+    CHECK_EQ(overridden.shell_args.size(), 3u);
+    CHECK_MSG(overridden.shell_args[0] == "-i", "the file replaces the default, not appends");
 }
 
-TEST(an_unreasonable_font_size_is_clamped_rather_than_obeyed) {
-    Defaults tiny;
-    tiny.font_size = 0.5;
-    CHECK_EQ(resolve(tiny, nullptr).font_size, kMinFontSize);
+TEST(an_unreasonable_font_size_is_clamped_and_reported) {
+    const Config tiny = config_from("font-size = 0.5");
+    CHECK_EQ(tiny.font_size, kMinFontSize);
+    CHECK_EQ(tiny.diagnostics.size(), 1u);
+    CHECK_EQ(tiny.diagnostics[0].line, 1);
 
-    Defaults huge;
-    huge.font_size = 4000.0;
-    CHECK_EQ(resolve(huge, nullptr).font_size, kMaxFontSize);
+    const Config huge = config_from("font-size = 4000");
+    CHECK_EQ(huge.font_size, kMaxFontSize);
 
-    Defaults sensible;
-    sensible.font_size = 15.0;
-    CHECK_EQ(resolve(sensible, nullptr).font_size, 15.0);
+    const Config sensible = config_from("font-size = 15");
+    CHECK_EQ(sensible.font_size, 15.0);
+    CHECK(sensible.diagnostics.empty());
 }
 
-TEST(an_unset_font_size_is_not_a_size_of_zero) {
-    Defaults unset;
-    unset.font_size = 0.0;
-    CHECK_EQ(resolve(unset, nullptr).font_size, kDefaultFontSize);
+TEST(a_font_size_that_is_not_a_number_keeps_the_default) {
+    const Config config = config_from("font-size = large");
+    CHECK_EQ(config.font_size, kDefaultFontSize);
+    CHECK_EQ(config.diagnostics.size(), 1u);
+    CHECK(config.diagnostics[0].message.find("not a number") != std::string::npos);
 }
 
-TEST(option_is_meta_unless_it_is_turned_off) {
-    Defaults off;
-    off.option_is_meta = 0;
-    CHECK(!resolve(off, nullptr).option_is_meta);
+TEST(booleans_accept_the_spellings_people_actually_write) {
+    CHECK(!config_from("option-is-meta = false").option_is_meta);
+    CHECK(!config_from("option-is-meta = no").option_is_meta);
+    CHECK(!config_from("option-is-meta = 0").option_is_meta);
+    CHECK(config_from("option-is-meta = true").option_is_meta);
+    CHECK(config_from("option-is-meta = yes").option_is_meta);
 
-    Defaults on;
-    on.option_is_meta = 1;
-    CHECK(resolve(on, nullptr).option_is_meta);
+    const Config bad = config_from("option-is-meta = maybe");
+    CHECK_MSG(bad.option_is_meta, "an unreadable value keeps the default");
+    CHECK_EQ(bad.diagnostics.size(), 1u);
+}
+
+TEST(the_theme_can_be_overridden_a_colour_at_a_time) {
+    const Config config = config_from(
+        "background = #2d2a2e\n"
+        "foreground = #fcfcfa\n"
+        "cursor-color = #ff6188\n");
+    CHECK(config.theme.background == (Rgba{0x2d, 0x2a, 0x2e, 255}));
+    CHECK(config.theme.foreground == (Rgba{0xfc, 0xfc, 0xfa, 255}));
+    CHECK(config.theme.cursor == (Rgba{0xff, 0x61, 0x88, 255}));
+    CHECK_MSG(config.theme.palette[16] == default_theme().palette[16],
+              "what the file did not mention is unchanged");
+}
+
+TEST(palette_entries_are_set_one_repeated_key_at_a_time) {
+    const Config config = config_from("palette = 1=#ff5555\npalette = 9=#ff6e6e\n");
+    CHECK(config.theme.palette[1] == (Rgba{0xff, 0x55, 0x55, 255}));
+    CHECK(config.theme.palette[9] == (Rgba{0xff, 0x6e, 0x6e, 255}));
+    CHECK(config.diagnostics.empty());
+}
+
+TEST(a_bad_palette_entry_is_reported_and_the_rest_still_apply) {
+    const Config config = config_from(
+        "palette = 1=#ff5555\n"
+        "palette = 900=#000000\n"
+        "palette = 2=notacolour\n"
+        "palette = nonsense\n"
+        "palette = 3=#00ff00\n");
+    CHECK(config.theme.palette[1] == (Rgba{0xff, 0x55, 0x55, 255}));
+    CHECK_MSG(config.theme.palette[3] == (Rgba{0x00, 0xff, 0x00, 255}),
+              "a bad line must not stop the ones after it");
+    CHECK_EQ(config.diagnostics.size(), 3u);
+    CHECK_EQ(config.diagnostics[0].line, 2);
+    CHECK_EQ(config.diagnostics[1].line, 3);
+    CHECK_EQ(config.diagnostics[2].line, 4);
+}
+
+TEST(an_unknown_setting_is_named_rather_than_ignored) {
+    // Usually a misspelling of a real one, and silence would mean editing the
+    // file and wondering why nothing changed.
+    const Config config = config_from("font-size = 14\nfont-familly = Menlo\n");
+    CHECK_EQ(config.font_size, 14.0);
+    CHECK_EQ(config.diagnostics.size(), 1u);
+    CHECK_EQ(config.diagnostics[0].line, 2);
+    CHECK(config.diagnostics[0].message.find("unknown setting") != std::string::npos);
+    CHECK(config.diagnostics[0].message.find("font-familly") != std::string::npos);
+}
+
+TEST(the_opening_window_size_is_configurable_and_bounded) {
+    const Config config = config_from("window-rows = 40\nwindow-cols = 120\n");
+    CHECK_EQ(config.rows, 40);
+    CHECK_EQ(config.cols, 120);
+
+    const Config silly = config_from("window-rows = 0\nwindow-cols = 99999\n");
+    CHECK_EQ(silly.rows, kDefaultRows);
+    CHECK_EQ(silly.cols, kDefaultCols);
+    CHECK_EQ(silly.diagnostics.size(), 2u);
+}
+
+TEST(parse_errors_and_value_errors_are_reported_together) {
+    const Config config = config_from("not a setting\nfont-size = huge\n");
+    CHECK_EQ(config.diagnostics.size(), 2u);
 }
 
 TEST(zoom_walks_within_the_limits) {

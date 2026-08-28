@@ -45,6 +45,9 @@ static void BuildMenuBar(void) {
                                     NSEventModifierFlagCommand)];
     [viewMenu addItem:ItemWithTitle(@"Actual Size", @selector(zoomReset:), @"0",
                                     NSEventModifierFlagCommand)];
+    [viewMenu addItem:[NSMenuItem separatorItem]];
+    [viewMenu addItem:ItemWithTitle(@"Reload Config", @selector(reloadConfig:), @"r",
+                                    NSEventModifierFlagCommand)];
     viewItem.submenu = viewMenu;
     [bar addItem:viewItem];
 

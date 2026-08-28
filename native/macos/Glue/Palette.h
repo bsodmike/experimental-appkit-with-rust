@@ -9,6 +9,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string_view>
 
 namespace glue {
 
@@ -32,8 +33,13 @@ struct Theme {
     Rgba palette[256];
 };
 
-/// The one theme v0 has. A constant until it is a preference (PRD-mac §8).
+/// The theme a config file starts from: what you get with no file at all.
 const Theme& default_theme();
+
+/// Parse `#rrggbb` or `#rgb`, case-insensitive. `false` and an untouched `out`
+/// for anything else, including a missing `#` -- a colour that cannot be read
+/// is reported to the user rather than guessed at.
+bool parse_color(std::string_view text, Rgba& out);
 
 /// The colours one run is actually drawn with.
 struct Resolved {

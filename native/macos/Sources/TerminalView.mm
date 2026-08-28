@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "Config.h"
+#include "ConfigFile.h"
 #include "Diagnostics.h"
 #include "FrameBuffers.h"
 #include "KeyMap.h"
@@ -39,6 +40,8 @@ static void CrusttyWakeUp(void *ctx) {
     double _fontSize;
     CTFontRef _font;
     NSString *_markedText;
+    std::string _configPath;
+    BOOL _configErrorsDismissed;
     BOOL _hungUp;
     std::string _titleSuffix;
     std::string _overlay;
@@ -64,29 +67,28 @@ static void CrusttyWakeUp(void *ctx) {
     }
 }
 
-/// Read NSUserDefaults, and let Glue decide what to believe (PRD-mac §8).
+/// Read the config file, and let Glue decide what to believe (PRD-mac §8).
+///
+/// The Objective-C here is three getenv calls; where the file lives, how it
+/// parses and which values survive validation are all decided in Glue, where
+/// they are tested.
 - (glue::Config)loadConfig {
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    glue::Defaults raw;
+    _configPath = glue::config_path(getenv("XDG_CONFIG_HOME"), getenv("HOME"));
+    return glue::resolve(glue::load(_configPath), getenv("SHELL"));
+}
 
-    NSString *fontName = [defaults stringForKey:@"fontName"];
-    std::string fontNameStorage = fontName != nil ? fontName.UTF8String : "";
-    raw.font_name = fontNameStorage.empty() ? nullptr : fontNameStorage.c_str();
-
-    if ([defaults objectForKey:@"fontSize"] != nil) {
-        raw.font_size = [defaults doubleForKey:@"fontSize"];
-    }
-
-    NSString *shell = [defaults stringForKey:@"shell"];
-    std::string shellStorage = shell != nil ? shell.UTF8String : "";
-    raw.shell = shellStorage.empty() ? nullptr : shellStorage.c_str();
-
-    if ([defaults objectForKey:@"optionIsMeta"] != nil) {
-        raw.option_is_meta = [defaults boolForKey:@"optionIsMeta"] ? 1 : 0;
-    }
-
-    const char *envShell = getenv("SHELL");
-    return glue::resolve(raw, envShell);
+/// Re-read the config and apply what can be applied to a running session.
+///
+/// The font, the colours and the keyboard mode take effect immediately. The
+/// shell and the opening window size cannot: one is already running and the
+/// other has already happened.
+- (void)reloadConfig {
+    _config = [self loadConfig];
+    _fontSize = _config.font_size;
+    _configErrorsDismissed = NO;
+    [self rebuildFont];
+    [self syncTerminalSize];
+    [self setNeedsDisplay:YES];
 }
 
 /// Measure the font. Everything about the grid follows from these numbers.
@@ -258,7 +260,7 @@ static void CrusttyWakeUp(void *ctx) {
     [self checkChildStatus];
 
     CGContextRef ctx = (CGContextRef)[[NSGraphicsContext currentContext] CGContext];
-    const glue::Theme &theme = glue::default_theme();
+    const glue::Theme &theme = _config.theme;
     const double height = self.bounds.size.height;
 
     [self fillRect:dirtyRect color:theme.background inContext:ctx];
@@ -267,6 +269,7 @@ static void CrusttyWakeUp(void *ctx) {
         // A failed copy leaves the previous frame in the buffers; drawing a
         // mixture of two frames is worse than drawing neither.
         [self drawOverlayInContext:ctx];
+        [self drawConfigErrorsInContext:ctx];
         return;
     }
 
@@ -290,6 +293,7 @@ static void CrusttyWakeUp(void *ctx) {
 
     [self drawCursorWithTheme:theme inContext:ctx];
     [self drawOverlayInContext:ctx];
+    [self drawConfigErrorsInContext:ctx];
 }
 
 - (void)fillRect:(NSRect)rect color:(glue::Rgba)color inContext:(CGContextRef)ctx {
@@ -437,6 +441,36 @@ static void CrusttyWakeUp(void *ctx) {
     [text drawAtPoint:NSMakePoint(6, 4) withAttributes:attributes];
 }
 
+/// Mistakes in the config file, listed with their line numbers.
+///
+/// Shown in every build, unlike the engine overlay below it: a typo here is the
+/// user's to fix, and a setting that silently fails to apply is worse than a
+/// line of red text (PRD-mac §8). Any keystroke dismisses it.
+- (void)drawConfigErrorsInContext:(CGContextRef)ctx {
+    if (_configErrorsDismissed || _config.diagnostics.empty()) {
+        return;
+    }
+
+    std::string report = _configPath;
+    for (const glue::Diagnostic &diagnostic : _config.diagnostics) {
+        report += "\n  line " + std::to_string(diagnostic.line) + ": " + diagnostic.message;
+    }
+    report += "\n  (press any key to dismiss, Cmd-R to reload)";
+
+    NSString *text = @(report.c_str());
+    NSDictionary *attributes = @{
+        NSFontAttributeName : [NSFont monospacedSystemFontOfSize:11.0
+                                                          weight:NSFontWeightRegular],
+        NSForegroundColorAttributeName : [NSColor whiteColor],
+    };
+    const NSSize size = [text sizeWithAttributes:attributes];
+    const NSRect band =
+        NSMakeRect(0, self.bounds.size.height - size.height - 8, self.bounds.size.width,
+                   size.height + 8);
+    [self fillRect:band color:glue::Rgba{110, 60, 0, 235} inContext:ctx];
+    [text drawAtPoint:NSMakePoint(6, band.origin.y + 4) withAttributes:attributes];
+}
+
 #pragma mark - Input
 
 - (BOOL)acceptsFirstResponder {
@@ -444,6 +478,10 @@ static void CrusttyWakeUp(void *ctx) {
 }
 
 - (void)keyDown:(NSEvent *)event {
+    if (!_configErrorsDismissed && !_config.diagnostics.empty()) {
+        _configErrorsDismissed = YES;
+        [self setNeedsDisplay:YES];
+    }
     if (_hungUp) {
         return;  // nothing to type into
     }

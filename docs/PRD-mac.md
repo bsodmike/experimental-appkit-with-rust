@@ -112,15 +112,33 @@ therefore at `viewHeight - cellHeight`, which `Metrics` computes and tests.
 
 ### Where the font comes from
 
-**Decision: the font and its default size come from `NSUserDefaults`, and are
-validated in `Glue::Config` before anything believes them.**
+**Decision: every setting comes from one config file, in Ghostty's format, at
+`~/.config/crustty/config` — and nothing comes from `NSUserDefaults`.**
 
-`defaults write com.inertialbox.crustty fontSize -int 15` should not require a
-rebuild, and `NSUserDefaults` is the platform's answer to that — no file format
-to invent, no parser to write, no reload story. What arrives is not trusted: a
-size of zero is not a preference, and a named font that is not installed falls
-back to the system monospaced font, which is always present and actually
-monospaced.
+An earlier version read `NSUserDefaults`, on the reasoning that it costs no
+format, no parser and no reload story. That was true and beside the point: a
+terminal's configuration is something people keep in a dotfiles repository, diff,
+copy between machines and read as a whole. `defaults write` is none of those.
+Ghostty's format specifically, because it is the one a user of this app is most
+likely to already have muscle memory for, and a flat `key = value` file is the
+smallest thing that does the job.
+
+The parsing, the path resolution, the validation and the theme overrides all live
+in `Glue`, so all of it is tested on Linux. What arrives is not trusted: a size
+of zero is not a preference, and a named font that is not installed falls back to
+the system monospaced font, which is always present and actually monospaced.
+
+**Decision: a mistake in the file is shown on screen in every build.** An unknown
+key or a malformed colour is the user's typo, not an engine failure, and a
+setting that silently fails to apply sends them back to the file wondering why
+nothing changed. The bad lines are listed with their numbers in a band across the
+top; everything valid still applies. This is deliberately unlike the engine's own
+diagnostics, which are Debug-only and drawn at the bottom — different audiences,
+different failures.
+
+**Decision: ⌘R reloads it.** The font, colours and keyboard mode apply to the
+running session; the shell and opening size cannot, and are documented as taking
+effect next launch.
 
 **Decision: ⌘+, ⌘− and ⌘0 change the size, and the change is not persisted.**
 Zoom takes the same path a window resize already takes — remeasure the font,
@@ -451,6 +469,7 @@ that already holds them, which is the point of stopping here.
 | 12 | Notarized direct download; the App Store is out of scope because the sandbox breaks the product |
 | 13 | Hardened Runtime on from the first Release build; ad-hoc signing until a certificate exists |
 | 14 | Tests are tiered by what can be known, and the Linux-testable tier is the large one |
-| 15 | Font and size come from `NSUserDefaults`, validated in `Glue`; zoom is not persisted |
+| 15 | One config file in Ghostty's format at `~/.config/crustty/config`, parsed and validated in `Glue`; ⌘R reloads; zoom is not persisted |
+| 18 | Config mistakes are shown in every build, with line numbers, and never stop the rest of the file applying |
 | 16 | A clean exit closes the window; a crash keeps it, and an unexplained hangup is never read as clean |
 | 17 | Debug builds draw the engine's last error; the closing rule never depends on the build |

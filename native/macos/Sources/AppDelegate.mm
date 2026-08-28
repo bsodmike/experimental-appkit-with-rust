@@ -84,4 +84,9 @@
     [_view resetZoom];
 }
 
+- (void)reloadConfig:(id)sender {
+    (void)sender;
+    [_view reloadConfig];
+}
+
 @end

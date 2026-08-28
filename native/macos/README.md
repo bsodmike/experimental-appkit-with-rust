@@ -65,20 +65,47 @@ you can read is the one that counts.
 
 ## Configuration
 
-Settings come from `NSUserDefaults`, so you can change them without rebuilding:
+Everything the frontend can be configured by lives in one file:
 
-```sh
-defaults write com.inertialbox.crustty fontName -string "SF Mono"
-defaults write com.inertialbox.crustty fontSize -int 15
-defaults write com.inertialbox.crustty shell -string /opt/homebrew/bin/fish
-defaults write com.inertialbox.crustty optionIsMeta -bool false
+```
+~/.config/crustty/config
 ```
 
-Unset values fall back to the system monospaced font at 13pt, `$SHELL`, and
-Option-as-Meta. A font size outside 6–72 is clamped rather than obeyed. Reset
-everything with `defaults delete com.inertialbox.crustty`.
+`$XDG_CONFIG_HOME/crustty/config` if you set that variable, and a plain file at
+`~/.config/crustty` also works if you would rather not have the directory. There
+is no file by default, and that is fine — every setting has one.
 
-Font size also responds to ⌘+, ⌘− and ⌘0, which is not persisted.
+The format is Ghostty's: one `key = value` per line, `#` comments, and repeated
+keys where a setting is really a list. `crustty.example.conf` in this directory
+documents every key; copy it and uncomment what you want.
+
+```ini
+font-family = SF Mono
+font-size = 15
+
+background = #2d2a2e
+foreground = #fcfcfa
+cursor-color = #ff6188
+
+palette = 1=#ff6188
+palette = 9=#ff6188
+
+shell = /opt/homebrew/bin/fish
+option-is-meta = true
+```
+
+**⌘R reloads it** without relaunching. The font, the colours and the keyboard
+mode apply immediately; the shell and the opening window size cannot, since one
+is already running and the other has already happened.
+
+A `#` starts a comment **only at the start of a line**, so colours are written
+normally rather than escaped.
+
+**Mistakes are shown, not swallowed.** An unknown key, a malformed colour or a
+size outside 6–72 puts an orange band across the top of the window naming the
+line and what was wrong with it, in release builds as much as debug ones.
+Everything valid in the file still applies. Any keystroke dismisses the band;
+⌘R brings it back if the file is still wrong.
 
 ## Checking it works
 
@@ -132,8 +159,8 @@ just native-libs
 Add anything missing to `OTHER_LDFLAGS` in `project.yml`.
 
 **The app builds but the shell does not start.** Check `$SHELL` is what you
-think, and try `defaults write com.inertialbox.crustty shell -string /bin/zsh`.
-A Debug build shows the engine's own error on screen when this happens.
+think, and try putting `shell = /bin/zsh` in your config. A Debug build shows
+the engine's own error on screen when this happens.
 
 **Something changed in Rust but the app did not notice.** The pre-build script
 declares its inputs, and those are the crate roots rather than every file. If

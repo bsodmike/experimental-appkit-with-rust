@@ -58,6 +58,46 @@ bool has(std::uint16_t attrs, std::uint16_t flag) { return (attrs & flag) != 0; 
 
 }  // namespace
 
+bool parse_color(std::string_view text, Rgba& out) {
+    if (text.size() < 2 || text.front() != '#') {
+        return false;
+    }
+    const std::string_view digits = text.substr(1);
+    if (digits.size() != 3 && digits.size() != 6) {
+        return false;
+    }
+    const auto nibble = [](char c, int& value) {
+        if (c >= '0' && c <= '9') {
+            value = c - '0';
+        } else if (c >= 'a' && c <= 'f') {
+            value = c - 'a' + 10;
+        } else if (c >= 'A' && c <= 'F') {
+            value = c - 'A' + 10;
+        } else {
+            return false;
+        }
+        return true;
+    };
+
+    int parts[6] = {0, 0, 0, 0, 0, 0};
+    for (std::size_t i = 0; i < digits.size(); ++i) {
+        if (!nibble(digits[i], parts[i])) {
+            return false;
+        }
+    }
+
+    if (digits.size() == 3) {
+        // #abc means #aabbcc, which is the convention everywhere else.
+        out = Rgba{static_cast<std::uint8_t>(parts[0] * 17), static_cast<std::uint8_t>(parts[1] * 17),
+                   static_cast<std::uint8_t>(parts[2] * 17), 255};
+    } else {
+        out = Rgba{static_cast<std::uint8_t>((parts[0] << 4) | parts[1]),
+                   static_cast<std::uint8_t>((parts[2] << 4) | parts[3]),
+                   static_cast<std::uint8_t>((parts[4] << 4) | parts[5]), 255};
+    }
+    return true;
+}
+
 const Theme& default_theme() {
     static const Theme theme = build_default_theme();
     return theme;
