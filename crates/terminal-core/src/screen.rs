@@ -22,7 +22,7 @@ use crate::cursor::Cursor;
 use crate::geometry::{Position, TerminalSize};
 use crate::logical_line::{LineId, LogicalLine};
 use crate::scrollback::Scrollback;
-use crate::text::{grapheme_width, graphemes};
+use crate::text::{display_width, grapheme_width, graphemes};
 
 /// The current drawing style applied to newly written cells (the SGR "pen").
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -52,6 +52,16 @@ impl Row {
             cells: vec![Cell::blank(); cols as usize],
             line_id,
             wrapped: false,
+        }
+    }
+
+    /// A row built from ready-made cells (used by reflow when re-laying display
+    /// rows produced by the renderer).
+    pub fn with_cells(cells: Vec<Cell>, line_id: LineId, wrapped: bool) -> Self {
+        Self {
+            cells,
+            line_id,
+            wrapped,
         }
     }
 
@@ -360,6 +370,163 @@ impl Screen {
             cell.content.push_str(cluster);
         }
     }
+
+    /// Resize the screen, reflowing wrapped lines to the new width (PRD §16).
+    ///
+    /// The active logical lines (grid rows regrouped by `line_id`, with the
+    /// straddling head folded back in) are re-wrapped to the new width; display
+    /// rows beyond the new height freeze into scrollback, and the cursor is
+    /// re-derived from its logical position so it stays on the same text.
+    ///
+    /// Limitation for now: growing the height pads with blank rows at the bottom
+    /// rather than pulling lines back from scrollback; the viewport/scroll anchor
+    /// (§16.3) that would do so is a later increment.
+    pub fn resize(&mut self, new_size: TerminalSize) {
+        if new_size == self.size {
+            return;
+        }
+        if new_size.is_empty() {
+            self.resize_to_empty(new_size);
+            return;
+        }
+
+        let (anchor_id, anchor_off) = self.cursor_logical_anchor();
+        let lines = self.reconstruct_active_lines();
+        self.size = new_size;
+        let new_cols = new_size.cols;
+        let new_rows = new_size.rows as usize;
+
+        let mut flat: Vec<Row> = Vec::new();
+        let mut cursor_at: Option<(usize, u16, bool)> = None;
+        for mut line in lines {
+            let lid = line.id();
+            let first = flat.len();
+            if lid == anchor_id {
+                let off = anchor_off.min(line.byte_len());
+                let starts = line.wrap(new_cols).to_vec();
+                let sub = starts.partition_point(|&s| s <= off);
+                let row_start = if sub == 0 {
+                    0
+                } else {
+                    starts[sub - 1] as usize
+                };
+                let width = display_width(&line.text()[row_start..off as usize]);
+                let arm = width as u16 >= new_cols;
+                let col = if arm {
+                    new_cols.saturating_sub(1)
+                } else {
+                    width as u16
+                };
+                cursor_at = Some((first + sub, col, arm));
+            }
+            let rendered = line.render_rows(new_cols);
+            let last = rendered.len().saturating_sub(1);
+            for (k, cells) in rendered.into_iter().enumerate() {
+                flat.push(Row::with_cells(cells, lid, k < last));
+            }
+        }
+
+        let total = flat.len();
+        let overflow = total.saturating_sub(new_rows);
+        let mut iter = flat.into_iter();
+        for _ in 0..overflow {
+            let row = iter.next().unwrap();
+            self.freeze_row(row);
+        }
+        let mut rows: VecDeque<Row> = iter.collect();
+        while rows.len() < new_rows {
+            let id = self.alloc_line_id();
+            rows.push_back(Row::blank(new_cols, id));
+        }
+        self.rows = rows;
+
+        let (flat_row, col, arm) = cursor_at.unwrap_or((0, 0, false));
+        let row = flat_row
+            .saturating_sub(overflow)
+            .min(new_rows.saturating_sub(1)) as u16;
+        self.cursor.move_to(Position::new(row, col));
+        if arm {
+            self.cursor.arm_wrap();
+        }
+    }
+
+    /// Degenerate resize to a zero-sized screen: preserve content by freezing all
+    /// active lines into scrollback, then present blank rows.
+    fn resize_to_empty(&mut self, new_size: TerminalSize) {
+        for line in self.reconstruct_active_lines() {
+            self.scrollback.push(line);
+        }
+        self.size = new_size;
+        let mut rows = VecDeque::new();
+        for _ in 0..new_size.rows {
+            let id = self.alloc_line_id();
+            rows.push_back(Row::blank(new_size.cols, id));
+        }
+        self.rows = rows;
+        self.cursor.move_to(Position::new(0, 0));
+    }
+
+    /// The cursor's position as a logical anchor: the id of the logical line it
+    /// sits on, and the byte offset into that line's full text (including any
+    /// frozen head in `pending`). Stable across reflow (#20, §16.2).
+    fn cursor_logical_anchor(&self) -> (LineId, u32) {
+        let r = self.cursor.row() as usize;
+        let c = self.cursor.col() as usize;
+        let Some(row_r) = self.rows.get(r) else {
+            return (LineId(0), 0);
+        };
+        let lid = row_r.line_id();
+        let mut r0 = r;
+        while r0 > 0 && self.rows[r0 - 1].line_id() == lid {
+            r0 -= 1;
+        }
+        let mut offset = 0u32;
+        if let Some(p) = &self.pending
+            && p.id() == lid
+        {
+            offset += p.byte_len();
+        }
+        for rr in r0..r {
+            offset += row_content_bytes(&self.rows[rr], self.rows[rr].width() as usize);
+        }
+        offset += row_content_bytes(&self.rows[r], c);
+        (lid, offset)
+    }
+
+    /// Regroup the active grid rows into logical lines (consecutive rows sharing
+    /// a `line_id`), folding the straddling head from `pending` into the first
+    /// line if it continues it. Consumes `pending`.
+    fn reconstruct_active_lines(&mut self) -> Vec<LogicalLine> {
+        let pending = self.pending.take();
+        let mut lines: Vec<LogicalLine> = Vec::new();
+        let mut i = 0;
+        while i < self.rows.len() {
+            let lid = self.rows[i].line_id();
+            let mut line =
+                if lines.is_empty() && i == 0 && matches!(&pending, Some(p) if p.id() == lid) {
+                    pending.clone().unwrap()
+                } else {
+                    LogicalLine::new(lid)
+                };
+            while i < self.rows.len() && self.rows[i].line_id() == lid {
+                let ends = !self.rows[i].is_wrapped();
+                line.push_cells(self.rows[i].cells(), ends);
+                i += 1;
+            }
+            lines.push(line);
+        }
+        lines
+    }
+}
+
+/// The number of content bytes in the first `upto` cells of a row (blanks count
+/// as their space byte, wide-char spacers as nothing).
+fn row_content_bytes(row: &Row, upto: usize) -> u32 {
+    let cells = row.cells();
+    cells[..upto.min(cells.len())]
+        .iter()
+        .map(|c| c.content.len() as u32)
+        .sum()
 }
 
 #[cfg(test)]
@@ -499,5 +666,85 @@ mod tests {
         assert_eq!(content_at(&s, 0, 0), "e\u{301}");
         // It did not consume a new cell.
         assert_eq!(s.cursor().position(), Position::new(0, 1));
+    }
+
+    fn row_str(s: &Screen, r: u16) -> String {
+        s.row(r)
+            .unwrap()
+            .cells()
+            .iter()
+            .map(|c| c.content.as_str())
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    #[test]
+    fn resize_to_same_size_is_a_noop() {
+        let mut s = Screen::new(TerminalSize::new(3, 6));
+        s.print("hello");
+        let before = s.cursor().position();
+        s.resize(TerminalSize::new(3, 6));
+        assert_eq!(s.cursor().position(), before);
+        assert_eq!(row_str(&s, 0), "hello");
+    }
+
+    #[test]
+    fn narrowing_reflows_a_wrapped_line_and_keeps_the_cursor_on_its_text() {
+        let mut s = Screen::new(TerminalSize::new(3, 6));
+        s.print("abcdefghij"); // wraps: row0 "abcdef", row1 "ghij", cursor (1,4)
+        assert_eq!(s.cursor().position(), Position::new(1, 4));
+
+        s.resize(TerminalSize::new(3, 3));
+        // "abcdefghij" at width 3 is abc|def|ghi|j (4 rows), plus the trailing
+        // blank line, so 5 display rows against a height of 3: the top two rows
+        // ("abc","def") overflow into the straddling head, leaving ghi|j|blank.
+        assert_eq!(row_str(&s, 0), "ghi");
+        assert_eq!(row_str(&s, 1), "j");
+        assert_eq!(row_str(&s, 2), "");
+        assert_eq!(s.pending_head().unwrap().text(), "abcdef");
+        // Cursor still sits just after 'j'.
+        assert_eq!(s.cursor().position(), Position::new(1, 1));
+    }
+
+    #[test]
+    fn reflow_round_trips_back_to_the_original_layout() {
+        let mut s = Screen::new(TerminalSize::new(3, 6));
+        s.print("abcdefghij");
+        let cursor_before = s.cursor().position();
+
+        s.resize(TerminalSize::new(3, 3));
+        s.resize(TerminalSize::new(3, 6));
+
+        // Back to the original wrapping and cursor position (idempotent, §16.3).
+        assert_eq!(row_str(&s, 0), "abcdef");
+        assert_eq!(row_str(&s, 1), "ghij");
+        assert_eq!(s.cursor().position(), cursor_before);
+    }
+
+    #[test]
+    fn growing_width_unwraps_a_line_onto_one_row() {
+        let mut s = Screen::new(TerminalSize::new(3, 4));
+        s.print("abcdef"); // width 4: row0 "abcd", row1 "ef"
+        assert_eq!(row_str(&s, 0), "abcd");
+        assert_eq!(row_str(&s, 1), "ef");
+        s.resize(TerminalSize::new(3, 8));
+        assert_eq!(row_str(&s, 0), "abcdef");
+        assert_eq!(row_str(&s, 1), "");
+    }
+
+    #[test]
+    fn styles_survive_reflow() {
+        let mut s = Screen::new(TerminalSize::new(2, 6));
+        s.pen_mut().fg = Color::RED;
+        s.print("abcd");
+        s.resize(TerminalSize::new(2, 2));
+        // 'd' stays in the active grid after the reflow, still red.
+        let d = s
+            .rows()
+            .flat_map(|r| r.cells())
+            .find(|c| c.content == "d")
+            .unwrap();
+        assert_eq!(d.fg, Color::RED);
     }
 }
