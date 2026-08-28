@@ -514,13 +514,35 @@ buffer:
 pub struct TerminalRun {
     pub utf8_offset: u32,   // into an accompanying byte buffer
     pub utf8_len: u32,
-    pub col: u16,           // starting column
-    pub cols: u16,          // columns occupied (wide chars count 2)
     pub fg: u32,
     pub bg: u32,
+    pub row: u16,           // display row
+    pub col: u16,           // starting column
+    pub cols: u16,          // columns occupied (wide chars count 2)
     pub attrs: u16,
 }
 ```
+
+`row` was not in the first sketch. It is here so one flat array of runs is
+self-describing, and the copy-out call stays a single buffer with a single
+length rather than runs plus a parallel row index. The field order above packs
+to 24 bytes with no padding.
+
+`fg` and `bg` are *packed*, not resolved: `0x00_000000` is the terminal default,
+`0x01_0000II` a palette index, `0x02_RRGGBB` truecolour. The engine owns no
+theme (§5), so "asked for the default" has to survive the boundary as something
+the frontend can still recognise. A zeroed run therefore reads as "default on
+default".
+
+**Implemented.** `terminal-core`'s `render` module builds exactly this, as
+`prelude::Frame` (one `String` plus one `Vec<Run>`, the two buffers the copy-out
+call will fill) and `prelude::Run`. `Screen::render_into` refills a frame while
+keeping its capacity, so the redraw path allocates nothing in the steady state,
+and the cursor position is captured in the same snapshot so the caret cannot
+disagree with the text under it. Coalescing, the wide-character spacer and the
+`row` decision are recorded in `docs/adrs/2026-08-28.adr-render-frame.md`.
+Damage tracking, selection, the alternate screen and a scrolled-back viewport
+are later slices.
 
 Three reasons this is better than a cell array:
 
