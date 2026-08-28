@@ -10,6 +10,8 @@
 //! result is cached per line (#23). Offsets are byte offsets into `text`,
 //! grapheme-aligned (#20).
 
+use compact_str::CompactString;
+
 use crate::cell::{Cell, CellAttrs};
 use crate::color::Color;
 use crate::text::{grapheme_indices, grapheme_width};
@@ -146,6 +148,66 @@ impl LogicalLine {
     pub fn display_row_count(&mut self, width: u16) -> usize {
         self.wrap(width).len() + 1
     }
+
+    /// Unpack the line into display rows of cells, wrapped to `width` and padded
+    /// to it. This is the inverse of packing (`from_cells`) and the shape the
+    /// render path and reflow both consume: styles come from the runs, a wide
+    /// grapheme is followed by an empty spacer cell, and each row is padded with
+    /// blanks to `width`.
+    pub fn render_rows(&mut self, width: u16) -> Vec<Vec<Cell>> {
+        if width == 0 {
+            return vec![Vec::new()];
+        }
+        let starts = self.wrap(width).to_vec();
+        let text_len = self.text.len() as u32;
+        let mut bounds = Vec::with_capacity(starts.len() + 2);
+        bounds.push(0);
+        bounds.extend_from_slice(&starts);
+        bounds.push(text_len);
+        bounds
+            .windows(2)
+            .map(|pair| self.cells_in_range(pair[0], pair[1], width))
+            .collect()
+    }
+
+    /// The style covering byte offset `byte`, or defaults if outside any run.
+    fn style_at(&self, byte: u32) -> (Color, Color, CellAttrs) {
+        for run in &self.runs {
+            if byte >= run.byte_start && byte < run.byte_start + run.byte_len {
+                return (run.fg, run.bg, run.attrs);
+            }
+        }
+        (Color::Default, Color::Default, CellAttrs::EMPTY)
+    }
+
+    /// Build the cells for one display row spanning bytes `[b0, b1)`, padded to
+    /// `width`.
+    fn cells_in_range(&self, b0: u32, b1: u32, width: u16) -> Vec<Cell> {
+        let mut cells: Vec<Cell> = Vec::with_capacity(width as usize);
+        let slice = &self.text[b0 as usize..b1 as usize];
+        for (rel, cluster) in grapheme_indices(slice) {
+            let (fg, bg, attrs) = self.style_at(b0 + rel as u32);
+            cells.push(Cell {
+                content: cluster.into(),
+                fg,
+                bg,
+                attrs,
+            });
+            if grapheme_width(cluster) == 2 {
+                cells.push(Cell {
+                    content: CompactString::const_new(""),
+                    fg,
+                    bg,
+                    attrs,
+                });
+            }
+        }
+        while (cells.len() as u16) < width {
+            cells.push(Cell::blank());
+        }
+        cells.truncate(width as usize);
+        cells
+    }
 }
 
 /// Scan the text accumulating grapheme display widths, returning the byte
@@ -277,5 +339,60 @@ mod tests {
         let mut line = LogicalLine::from_cells(LineId(0), &[]);
         assert_eq!(line.text(), "");
         assert_eq!(line.display_row_count(80), 1);
+    }
+
+    fn row_text(cells: &[Cell]) -> String {
+        cells.iter().map(|c| c.content.as_str()).collect()
+    }
+
+    #[test]
+    fn render_pads_a_short_line_to_width() {
+        let mut line = line_of(0, "abc");
+        let rows = line.render_rows(5);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].len(), 5);
+        assert_eq!(row_text(&rows[0]), "abc  ");
+    }
+
+    #[test]
+    fn render_wraps_into_multiple_rows() {
+        let mut line = line_of(0, "abcdef");
+        let rows = line.render_rows(3);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(row_text(&rows[0]), "abc");
+        assert_eq!(row_text(&rows[1]), "def");
+    }
+
+    #[test]
+    fn render_places_a_spacer_after_a_wide_char() {
+        let mut line = line_of(0, "a\u{4E2D}b");
+        let rows = line.render_rows(4);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0].content, "a");
+        assert_eq!(rows[0][1].content, "\u{4E2D}");
+        assert_eq!(rows[0][2].content, ""); // spacer
+        assert_eq!(rows[0][3].content, "b");
+    }
+
+    #[test]
+    fn render_preserves_run_styles() {
+        let cells = [styled("a", Color::RED), styled("b", Color::BLUE)];
+        let mut line = LogicalLine::from_cells(LineId(0), &cells);
+        let rows = line.render_rows(4);
+        assert_eq!(rows[0][0].fg, Color::RED);
+        assert_eq!(rows[0][1].fg, Color::BLUE);
+        assert!(rows[0][2].is_blank());
+    }
+
+    #[test]
+    fn pack_then_render_round_trips_text() {
+        let mut line = line_of(0, "hello world");
+        let rows = line.render_rows(4);
+        let joined: String = rows
+            .iter()
+            .flat_map(|r| r.iter())
+            .map(|c| c.content.as_str())
+            .collect();
+        assert_eq!(joined.trim_end(), "hello world");
     }
 }
