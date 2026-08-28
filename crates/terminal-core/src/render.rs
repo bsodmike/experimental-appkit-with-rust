@@ -443,7 +443,7 @@ mod tests {
         let mut s = screen(3, 10);
         assert!(s.render().cursor_visible(), "visible by default");
         let mut p = crate::parsers::vt::VtParser::new();
-        s.advance(&mut p, b"\x1b[?25l");
+        let _ = s.advance(&mut p, b"\x1b[?25l");
         assert!(!s.render().cursor_visible());
     }
 

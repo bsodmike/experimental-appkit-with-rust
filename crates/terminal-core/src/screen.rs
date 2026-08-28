@@ -263,7 +263,10 @@ impl Screen {
     /// A query like `CSI 6 n` is answered *upstream*, into the PTY, not on the
     /// screen: parsing therefore has an output side. The engine does not own the
     /// PTY, so it queues the answer here and the caller that does own it — the
-    /// session wrapper of PRD §7 — writes it after each parse.
+    /// session wrapper of PRD §7 — writes it out.
+    ///
+    /// Callers driving [`Screen::apply`] directly need this; callers using
+    /// [`Screen::advance`] are handed the replies already.
     pub fn take_replies(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.replies)
     }
@@ -813,12 +816,21 @@ fn row_content_bytes(row: &Row, upto: usize) -> u32 {
 /// These are the bounds-clamped grid edits a parsed [`Command`] maps onto; scroll
 /// regions are not modelled yet, so moves clamp to the whole screen.
 impl Screen {
-    /// Feed bytes through `parser` and apply the resulting commands. This is the
-    /// engine's main input entry point (the PTY reader calls it).
-    pub fn advance(&mut self, parser: &mut VtParser, bytes: &[u8]) {
+    /// Feed bytes through `parser`, apply the resulting commands, and return
+    /// the bytes now owed to the program. This is the engine's main input entry
+    /// point (the PTY reader calls it).
+    ///
+    /// The reply is *returned*, not left behind a getter, because a program
+    /// that sends `CSI 6 n` blocks until it is answered (PRD §9): an ignored
+    /// answer shows up as a mysterious hang, so ignoring it has to be something
+    /// the caller does on purpose. Usually empty, and an empty `Vec` does not
+    /// allocate.
+    #[must_use = "these bytes are owed to the program: write them to the PTY (PRD §9)"]
+    pub fn advance(&mut self, parser: &mut VtParser, bytes: &[u8]) -> Vec<u8> {
         for cmd in parser.feed(bytes) {
             self.apply(&cmd);
         }
+        self.take_replies()
     }
 
     /// Apply one parsed VT command.
@@ -1240,6 +1252,12 @@ impl Screen {
 mod tests {
     use super::*;
 
+    /// Drive the screen from bytes, dropping replies the test does not check.
+    /// Tests that care about the reply call `Screen::advance` directly.
+    fn advance(s: &mut Screen, p: &mut VtParser, bytes: &[u8]) {
+        let _ = s.advance(p, bytes);
+    }
+
     fn content_at(s: &Screen, row: u16, col: u16) -> String {
         s.cell(Position::new(row, col)).unwrap().content.to_string()
     }
@@ -1523,7 +1541,7 @@ mod tests {
         let mut s = Screen::new(TerminalSize::new(3, 10));
         let mut p = VtParser::new();
         // Print, newline, then a red bold 'X'.
-        s.advance(&mut p, b"hi\r\n\x1b[1;31mX");
+        advance(&mut s, &mut p, b"hi\r\n\x1b[1;31mX");
         assert_eq!(row_str(&s, 0), "hi");
         let x = s.cell(Position::new(1, 0)).unwrap();
         assert_eq!(x.content, "X");
@@ -1769,7 +1787,7 @@ mod tests {
         let mut s = numbered(5, 8);
         let mut p = VtParser::new();
         // Region rows 2..4 (1-based), cursor to the bottom margin, line feed.
-        s.advance(&mut p, b"\x1b[2;4r\x1b[4;1H\n");
+        advance(&mut s, &mut p, b"\x1b[2;4r\x1b[4;1H\n");
         assert_eq!(rows_str(&s), ["r0", "r2", "r3", "", "r4"]);
     }
 
@@ -1814,7 +1832,7 @@ mod tests {
     fn autowrap_off_overwrites_the_last_column() {
         let mut s = Screen::new(TerminalSize::new(2, 4));
         let mut p = VtParser::new();
-        s.advance(&mut p, b"\x1b[?7l");
+        advance(&mut s, &mut p, b"\x1b[?7l");
         s.print("abcdef");
         assert_eq!(row_str(&s, 0), "abcf", "the tail piles up on the last cell");
         assert_eq!(row_str(&s, 1), "");
@@ -1826,7 +1844,7 @@ mod tests {
     fn autowrap_back_on_wraps_again() {
         let mut s = Screen::new(TerminalSize::new(2, 4));
         let mut p = VtParser::new();
-        s.advance(&mut p, b"\x1b[?7labcd\x1b[?7hef");
+        advance(&mut s, &mut p, b"\x1b[?7labcd\x1b[?7hef");
         assert_eq!(row_str(&s, 0), "abce");
         assert_eq!(row_str(&s, 1), "f");
     }
@@ -1844,11 +1862,11 @@ mod tests {
     fn mode_sequences_drive_the_engine_state() {
         let mut s = Screen::new(TerminalSize::new(2, 4));
         let mut p = VtParser::new();
-        s.advance(&mut p, b"\x1b[?1;2004h\x1b=");
+        advance(&mut s, &mut p, b"\x1b[?1;2004h\x1b=");
         assert!(s.modes().application_cursor_keys);
         assert!(s.modes().bracketed_paste);
         assert!(s.modes().application_keypad);
-        s.advance(&mut p, b"\x1b[?1l\x1b>");
+        advance(&mut s, &mut p, b"\x1b[?1l\x1b>");
         assert!(!s.modes().application_cursor_keys);
         assert!(!s.modes().application_keypad);
         assert!(s.modes().bracketed_paste, "untouched modes stay put");
@@ -1864,7 +1882,7 @@ mod tests {
         s.cursor_to(1, 2);
         s.save_cursor();
         let mut p = VtParser::new();
-        s.advance(&mut p, b"\x1b[?25l\x1bc");
+        advance(&mut s, &mut p, b"\x1b[?25l\x1bc");
 
         assert_eq!(s.pen(), Pen::default());
         assert_eq!(s.modes(), Modes::default());
@@ -1888,18 +1906,20 @@ mod tests {
     fn a_cursor_position_query_is_answered_upstream_and_not_on_screen() {
         let mut s = Screen::new(TerminalSize::new(5, 10));
         let mut p = VtParser::new();
-        s.advance(&mut p, b"\x1b[3;5H\x1b[6n");
-        assert_eq!(s.take_replies(), b"\x1b[3;5R", "CPR is 1-based");
+        let owed = s.advance(&mut p, b"\x1b[3;5H\x1b[6n");
+        assert_eq!(owed, b"\x1b[3;5R", "CPR is 1-based");
         assert_eq!(row_str(&s, 2), "", "the answer never touches the screen");
-        assert!(!s.has_replies(), "taking the replies empties the queue");
+        assert!(
+            !s.has_replies(),
+            "advance hands the replies over, it does not keep them"
+        );
     }
 
     #[test]
     fn status_and_attribute_queries_are_answered() {
         let mut s = Screen::new(TerminalSize::new(2, 8));
         let mut p = VtParser::new();
-        s.advance(&mut p, b"\x1b[5n\x1b[c");
-        assert_eq!(s.take_replies(), b"\x1b[0n\x1b[?6c");
+        assert_eq!(s.advance(&mut p, b"\x1b[5n\x1b[c"), b"\x1b[0n\x1b[?6c");
     }
 
     #[test]
@@ -1907,17 +1927,16 @@ mod tests {
         // Better silence than an invented answer a program would believe.
         let mut s = Screen::new(TerminalSize::new(2, 8));
         let mut p = VtParser::new();
-        s.advance(&mut p, b"\x1b[99n");
-        assert!(!s.has_replies());
+        assert!(s.advance(&mut p, b"\x1b[99n").is_empty());
     }
 
     #[test]
     fn replies_stop_accumulating_once_the_queue_is_full() {
         let mut s = Screen::new(TerminalSize::new(2, 8));
-        let mut p = VtParser::new();
-        // A program can ask far faster than anyone drains.
+        // A program can ask far faster than anyone drains: nothing takes the
+        // replies here, so they pile up against the cap and then stop.
         for _ in 0..2000 {
-            s.advance(&mut p, b"\x1b[5n");
+            s.apply(&Command::DeviceStatusReport(5));
         }
         assert!(s.take_replies().len() <= 4096);
     }
@@ -1927,7 +1946,7 @@ mod tests {
         let mut s = Screen::new(TerminalSize::new(2, 8));
         let mut p = VtParser::new();
         assert_eq!(s.title(), "");
-        s.advance(&mut p, b"\x1b]0;my shell\x07");
+        advance(&mut s, &mut p, b"\x1b]0;my shell\x07");
         assert_eq!(s.title(), "my shell");
         assert_eq!(row_str(&s, 0), "", "the title never lands on the screen");
     }
@@ -1946,7 +1965,7 @@ mod tests {
         // the program that set it is still the one running.
         let mut s = Screen::new(TerminalSize::new(2, 8));
         let mut p = VtParser::new();
-        s.advance(&mut p, b"\x1b]2;kept\x07\x1bc");
+        advance(&mut s, &mut p, b"\x1b]2;kept\x07\x1bc");
         assert_eq!(s.title(), "kept");
     }
 
@@ -1955,7 +1974,7 @@ mod tests {
         let mut s = numbered(3, 8);
         s.cursor_to(1, 4);
         let mut p = VtParser::new();
-        s.advance(&mut p, b"\x1b[?1049h");
+        advance(&mut s, &mut p, b"\x1b[?1049h");
         assert!(s.is_alternate());
         assert_eq!(
             rows_str(&s),
@@ -1965,7 +1984,7 @@ mod tests {
         assert_eq!(s.cursor().position(), Position::new(0, 0));
 
         s.print("full-screen");
-        s.advance(&mut p, b"\x1b[?1049l");
+        advance(&mut s, &mut p, b"\x1b[?1049l");
         assert!(!s.is_alternate());
         assert_eq!(
             rows_str(&s),
@@ -1983,7 +2002,7 @@ mod tests {
     fn the_alternate_screen_keeps_no_history() {
         let mut s = Screen::new(TerminalSize::new(2, 8));
         let mut p = VtParser::new();
-        s.advance(&mut p, b"\x1b[?1049h");
+        advance(&mut s, &mut p, b"\x1b[?1049h");
         for _ in 0..10 {
             s.print("x");
             s.next_line();
@@ -1998,13 +2017,13 @@ mod tests {
         s.cursor_to(1, 0);
         s.line_feed(); // r0 into scrollback
         let mut p = VtParser::new();
-        s.advance(&mut p, b"\x1b[?1049h");
+        advance(&mut s, &mut p, b"\x1b[?1049h");
         assert_eq!(
             s.scrollback().len(),
             1,
             "scrollback is the terminal's, not the buffer's"
         );
-        s.advance(&mut p, b"\x1b[?1049l");
+        advance(&mut s, &mut p, b"\x1b[?1049l");
         assert_eq!(s.scrollback().len(), 1);
     }
 
@@ -2014,7 +2033,11 @@ mod tests {
         // cursor and margins belong to a buffer.
         let mut s = Screen::new(TerminalSize::new(3, 8));
         let mut p = VtParser::new();
-        s.advance(&mut p, b"\x1b[31m\x1b]2;title\x07\x1b[?7l\x1b[?1049h");
+        advance(
+            &mut s,
+            &mut p,
+            b"\x1b[31m\x1b]2;title\x07\x1b[?7l\x1b[?1049h",
+        );
         assert_eq!(s.pen().fg, Color::RED);
         assert_eq!(s.title(), "title");
         assert!(!s.modes().autowrap);
@@ -2024,15 +2047,15 @@ mod tests {
     fn switching_twice_does_not_stack() {
         let mut s = numbered(2, 8);
         let mut p = VtParser::new();
-        s.advance(&mut p, b"\x1b[?1049h");
+        advance(&mut s, &mut p, b"\x1b[?1049h");
         s.print("alt");
-        s.advance(&mut p, b"\x1b[?1049h");
+        advance(&mut s, &mut p, b"\x1b[?1049h");
         assert_eq!(
             row_str(&s, 0),
             "alt",
             "a second switch is not a second buffer"
         );
-        s.advance(&mut p, b"\x1b[?1049l\x1b[?1049l");
+        advance(&mut s, &mut p, b"\x1b[?1049l\x1b[?1049l");
         assert_eq!(rows_str(&s), ["r0", "r1"]);
     }
 
@@ -2041,7 +2064,7 @@ mod tests {
         let mut s = Screen::new(TerminalSize::new(3, 6));
         s.print("abcdefgh"); // wraps onto row 1 at width 6
         let mut p = VtParser::new();
-        s.advance(&mut p, b"\x1b[?1049h");
+        advance(&mut s, &mut p, b"\x1b[?1049h");
         s.print("alt text");
 
         s.resize(TerminalSize::new(3, 4));
@@ -2051,7 +2074,7 @@ mod tests {
         assert_eq!(row_str(&s, 1), "xt");
         assert!(s.rows().all(|r| r.width() == 4));
 
-        s.advance(&mut p, b"\x1b[?1049l");
+        advance(&mut s, &mut p, b"\x1b[?1049l");
         assert_eq!(
             row_str(&s, 0),
             "abcd",
@@ -2064,7 +2087,7 @@ mod tests {
     fn a_reset_comes_back_from_the_alternate_screen() {
         let mut s = numbered(2, 8);
         let mut p = VtParser::new();
-        s.advance(&mut p, b"\x1b[?1049h\x1bc");
+        advance(&mut s, &mut p, b"\x1b[?1049h\x1bc");
         assert!(!s.is_alternate());
         assert_eq!(
             rows_str(&s),
@@ -2077,9 +2100,9 @@ mod tests {
     fn sgr_reset_clears_the_pen() {
         let mut s = Screen::new(TerminalSize::new(1, 4));
         let mut p = VtParser::new();
-        s.advance(&mut p, b"\x1b[1;31m");
+        advance(&mut s, &mut p, b"\x1b[1;31m");
         assert_eq!(s.pen().fg, Color::RED);
-        s.advance(&mut p, b"\x1b[0m");
+        advance(&mut s, &mut p, b"\x1b[0m");
         assert_eq!(s.pen(), Pen::default());
     }
 }
