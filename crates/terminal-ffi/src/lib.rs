@@ -923,7 +923,13 @@ mod tests {
         let mut args = Vec::new();
         let config = config(script, &mut args);
         let handle = unsafe { terminal_create(&config) };
-        assert!(!handle.is_null(), "the shell should have started");
+        // The engine records why it could not start, so a failure here says
+        // what went wrong rather than only that something did.
+        assert!(
+            !handle.is_null(),
+            "the shell should have started: {}",
+            last_error()
+        );
         (Handle(handle), args)
     }
 
