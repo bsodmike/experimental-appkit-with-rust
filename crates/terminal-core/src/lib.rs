@@ -42,13 +42,13 @@ pub mod prelude {
     pub use crate::grid::Grid;
     pub use crate::logical_line::{AttrRun, LineId, LogicalLine};
     pub use crate::render::{Frame, Run};
-    pub use crate::screen::{Pen, Row, Screen};
+    pub use crate::screen::{Modes, Pen, Row, Screen};
     pub use crate::scrollback::Scrollback;
 
     /// The byte-stream parsers, reachable as `prelude::parsers::vt`.
     pub mod parsers {
         pub mod vt {
-            pub use crate::parsers::vt::{Command, EraseMode, Sgr, VtParser};
+            pub use crate::parsers::vt::{Command, EraseMode, Mode, Sgr, VtParser};
         }
     }
 }

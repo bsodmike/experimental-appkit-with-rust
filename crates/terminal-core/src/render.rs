@@ -77,6 +77,7 @@ pub struct Run {
 pub struct Frame {
     size: TerminalSize,
     cursor: Position,
+    cursor_visible: bool,
     text: String,
     runs: Vec<Run>,
 }
@@ -95,6 +96,7 @@ impl Frame {
         Self {
             size: TerminalSize::new(0, 0),
             cursor: Position::new(0, 0),
+            cursor_visible: true,
             text: String::new(),
             runs: Vec::new(),
         }
@@ -109,6 +111,12 @@ impl Frame {
     /// caret never disagrees with the text under it.
     pub fn cursor(&self) -> Position {
         self.cursor
+    }
+
+    /// Whether the frontend should draw a caret (DECTCEM). A full-screen
+    /// program that hides the cursor while redrawing expects this to be obeyed.
+    pub fn cursor_visible(&self) -> bool {
+        self.cursor_visible
     }
 
     /// The shared UTF-8 buffer the runs slice.
@@ -174,6 +182,7 @@ impl Screen {
         frame.clear();
         frame.size = self.size();
         frame.cursor = self.cursor().position();
+        frame.cursor_visible = self.modes().cursor_visible;
         if self.size().is_empty() {
             return;
         }
@@ -427,6 +436,15 @@ mod tests {
         s.print("abc");
         let frame = s.render();
         assert_eq!(frame.cursor(), Position::new(0, 3));
+    }
+
+    #[test]
+    fn hiding_the_cursor_travels_with_the_frame() {
+        let mut s = screen(3, 10);
+        assert!(s.render().cursor_visible(), "visible by default");
+        let mut p = crate::parsers::vt::VtParser::new();
+        s.advance(&mut p, b"\x1b[?25l");
+        assert!(!s.render().cursor_visible());
     }
 
     #[test]

@@ -74,9 +74,40 @@ pub enum Command {
     EraseInDisplay(EraseMode),
     EraseInLine(EraseMode),
     Sgr(Vec<Sgr>),
+    /// DECSC/DECRC: stash or restore the cursor together with the pen.
+    SaveCursor,
+    RestoreCursor,
+    /// Turn terminal modes on (`enabled`) or off. One sequence can carry
+    /// several; unrecognised mode numbers are dropped rather than reported.
+    SetModes {
+        modes: Vec<Mode>,
+        enabled: bool,
+    },
+    /// RIS: reset the terminal to its power-on state.
+    Reset,
     /// A recognised-but-unhandled sequence, already consumed. Never surfaced by
     /// [`VtParser::feed`]; kept as a variant so the parser can report progress.
     Ignored,
+}
+
+/// A terminal mode that can be turned on or off.
+///
+/// These are the modes the engine actually keeps: two that change what the
+/// keyboard sends (and so are engine state, PRD §5), one that changes the write
+/// path, and one the frontend reads to decide whether to draw a caret.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    /// DECCKM (`?1`): arrow keys send `SS3` rather than `CSI`.
+    ApplicationCursorKeys,
+    /// DECKPAM/DECKPNM (`ESC =` / `ESC >`): the keypad sends application codes.
+    ApplicationKeypad,
+    /// DECAWM (`?7`): text wraps at the right margin instead of overwriting the
+    /// last column.
+    AutoWrap,
+    /// DECTCEM (`?25`): whether the cursor is drawn.
+    CursorVisible,
+    /// `?2004`: pasted text is bracketed with `CSI 200~` / `CSI 201~`.
+    BracketedPaste,
 }
 
 /// The region an erase command clears, relative to the cursor.
@@ -219,6 +250,11 @@ fn parse_esc(input: &[u8]) -> IResult<&[u8], Command> {
         Some(b'D') => Ok((&rest[1..], Command::Index)),
         Some(b'M') => Ok((&rest[1..], Command::ReverseIndex)),
         Some(b'E') => Ok((&rest[1..], Command::NextLine)),
+        Some(b'7') => Ok((&rest[1..], Command::SaveCursor)),
+        Some(b'8') => Ok((&rest[1..], Command::RestoreCursor)),
+        Some(b'c') => Ok((&rest[1..], Command::Reset)),
+        Some(b'=') => Ok((&rest[1..], keypad_mode(true))),
+        Some(b'>') => Ok((&rest[1..], keypad_mode(false))),
         Some(_) => parse_esc_other(rest),
     }
 }
@@ -301,6 +337,9 @@ fn dispatch_csi(params_bytes: &[u8], final_b: u8) -> Command {
                 Some(n) => Some(n - 1),
             },
         },
+        // SCOSC/SCORC, the ANSI spelling of DECSC/DECRC.
+        b's' => Command::SaveCursor,
+        b'u' => Command::RestoreCursor,
         b'J' => Command::EraseInDisplay(erase_mode(param(&params, 0, 0))),
         b'K' => Command::EraseInLine(erase_mode(param(&params, 0, 0))),
         b'm' => Command::Sgr(parse_sgr(&params)),
@@ -308,11 +347,44 @@ fn dispatch_csi(params_bytes: &[u8], final_b: u8) -> Command {
     }
 }
 
-/// CSI sequences carrying a private-parameter prefix. None are acted on yet;
-/// they are consumed so the stream advances, and this is where DEC private
-/// modes (DECCKM, DECAWM, DECTCEM) and the alternate screen will land.
-fn dispatch_csi_private(_prefix: u8, _params_bytes: &[u8], _final_b: u8) -> Command {
-    Command::Ignored
+/// CSI sequences carrying a private-parameter prefix.
+///
+/// Only DEC private mode set/reset (`CSI ? Pm h` / `l`) is acted on; everything
+/// else is consumed so the stream advances. The alternate screen (`?1049` and
+/// friends) lands here in a later slice.
+fn dispatch_csi_private(prefix: u8, params_bytes: &[u8], final_b: u8) -> Command {
+    if prefix != b'?' || !matches!(final_b, b'h' | b'l') {
+        return Command::Ignored;
+    }
+    let modes: Vec<Mode> = parse_params(params_bytes)
+        .into_iter()
+        .flatten()
+        .filter_map(private_mode)
+        .collect();
+    if modes.is_empty() {
+        return Command::Ignored;
+    }
+    Command::SetModes {
+        modes,
+        enabled: final_b == b'h',
+    }
+}
+
+fn private_mode(n: u16) -> Option<Mode> {
+    match n {
+        1 => Some(Mode::ApplicationCursorKeys),
+        7 => Some(Mode::AutoWrap),
+        25 => Some(Mode::CursorVisible),
+        2004 => Some(Mode::BracketedPaste),
+        _ => None,
+    }
+}
+
+fn keypad_mode(enabled: bool) -> Command {
+    Command::SetModes {
+        modes: vec![Mode::ApplicationKeypad],
+        enabled,
+    }
 }
 
 /// Split `;`-separated decimal parameters; an empty field is `None` (use the
@@ -505,6 +577,43 @@ mod tests {
         assert_eq!(feed(input), vec![expected]);
     }
 
+    #[rstest]
+    #[case(b"\x1b7", Command::SaveCursor)]
+    #[case(b"\x1b8", Command::RestoreCursor)]
+    #[case(b"\x1b[s", Command::SaveCursor)]
+    #[case(b"\x1b[u", Command::RestoreCursor)]
+    #[case(b"\x1bc", Command::Reset)]
+    fn save_restore_and_reset(#[case] input: &[u8], #[case] expected: Command) {
+        assert_eq!(feed(input), vec![expected]);
+    }
+
+    #[rstest]
+    #[case(b"\x1b[?1h", vec![Mode::ApplicationCursorKeys], true)]
+    #[case(b"\x1b[?1l", vec![Mode::ApplicationCursorKeys], false)]
+    #[case(b"\x1b[?7l", vec![Mode::AutoWrap], false)]
+    #[case(b"\x1b[?25h", vec![Mode::CursorVisible], true)]
+    #[case(b"\x1b[?2004h", vec![Mode::BracketedPaste], true)]
+    #[case(b"\x1b[?1;25h", vec![Mode::ApplicationCursorKeys, Mode::CursorVisible], true)]
+    #[case(b"\x1b=", vec![Mode::ApplicationKeypad], true)]
+    #[case(b"\x1b>", vec![Mode::ApplicationKeypad], false)]
+    fn mode_set_and_reset(#[case] input: &[u8], #[case] modes: Vec<Mode>, #[case] enabled: bool) {
+        assert_eq!(feed(input), vec![Command::SetModes { modes, enabled }]);
+    }
+
+    #[test]
+    fn unknown_modes_are_dropped_and_known_ones_kept() {
+        // `?1049` (the alternate screen) is not handled yet, so it vanishes
+        // rather than being reported as something the engine acted on.
+        assert_eq!(feed(b"\x1b[?1049h"), vec![]);
+        assert_eq!(
+            feed(b"\x1b[?1049;25h"),
+            vec![Command::SetModes {
+                modes: vec![Mode::CursorVisible],
+                enabled: true,
+            }]
+        );
+    }
+
     #[test]
     fn a_private_prefix_never_reaches_the_standard_dispatch() {
         // `CSI ? 3 r` is XTRESTORE, not a scroll region, and `CSI ? 1 J` is
@@ -512,6 +621,7 @@ mod tests {
         assert_eq!(feed(b"\x1b[?3r"), vec![]);
         assert_eq!(feed(b"\x1b[?1J"), vec![]);
         assert_eq!(feed(b"\x1b[>c"), vec![]);
+        assert_eq!(feed(b"\x1b[?7s"), vec![], "XTSAVE, not a cursor save");
     }
 
     #[rstest]
@@ -583,10 +693,11 @@ mod tests {
 
     #[test]
     fn an_unhandled_escape_is_consumed_and_dropped() {
-        // ESC c (full reset) is recognised-but-unhandled: consumed, no command.
-        assert_eq!(feed(b"\x1bc"), vec![]);
+        // ESC ( B (designate US ASCII as G0) is recognised-but-unhandled:
+        // consumed, no command, including its intermediate byte.
+        assert_eq!(feed(b"\x1b(B"), vec![]);
         // And it does not swallow following text.
-        assert_eq!(feed(b"\x1bchi"), vec![Command::Print("hi".into())]);
+        assert_eq!(feed(b"\x1b(Bhi"), vec![Command::Print("hi".into())]);
     }
 
     #[test]

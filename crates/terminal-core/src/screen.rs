@@ -21,7 +21,7 @@ use crate::color::Color;
 use crate::cursor::Cursor;
 use crate::geometry::{Position, TerminalSize};
 use crate::logical_line::{LineId, LogicalLine};
-use crate::parsers::vt::{Command, EraseMode, Sgr, VtParser};
+use crate::parsers::vt::{Command, EraseMode, Mode, Sgr, VtParser};
 use crate::scrollback::Scrollback;
 use crate::text::{display_width, grapheme_width, graphemes};
 
@@ -115,6 +115,48 @@ pub struct Screen {
     /// Defaults to the whole screen.
     scroll_top: u16,
     scroll_bottom: u16,
+    modes: Modes,
+    /// The DECSC stash. `None` until something is saved; a restore with nothing
+    /// saved homes the cursor and resets the pen (VT100).
+    saved: Option<SavedCursor>,
+}
+
+/// The terminal modes the engine keeps (PRD §5: what the keyboard sends and how
+/// text is written are engine state, not the frontend's).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Modes {
+    /// DECCKM: arrow keys send `SS3` rather than `CSI`. Read by key encoding.
+    pub application_cursor_keys: bool,
+    /// DECKPAM/DECKPNM: the keypad sends application codes.
+    pub application_keypad: bool,
+    /// DECAWM: text wraps at the right margin. On by default.
+    pub autowrap: bool,
+    /// DECTCEM: whether the frontend draws a caret. On by default.
+    pub cursor_visible: bool,
+    /// Whether pasted text is bracketed. Read by the paste path.
+    pub bracketed_paste: bool,
+}
+
+impl Default for Modes {
+    fn default() -> Self {
+        Self {
+            application_cursor_keys: false,
+            application_keypad: false,
+            autowrap: true,
+            cursor_visible: true,
+            bracketed_paste: false,
+        }
+    }
+}
+
+/// What DECSC stashes: the cursor, its deferred wrap, and the pen. Saving the
+/// pen with the cursor is the whole point — programs use DECSC/DECRC to draw
+/// somewhere else and come back mid-style.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct SavedCursor {
+    position: Position,
+    pending_wrap: bool,
+    pen: Pen,
 }
 
 impl Screen {
@@ -142,6 +184,8 @@ impl Screen {
             pending: None,
             scroll_top: 0,
             scroll_bottom: size.rows.saturating_sub(1),
+            modes: Modes::default(),
+            saved: None,
         }
     }
 
@@ -167,6 +211,11 @@ impl Screen {
 
     pub fn pen(&self) -> Pen {
         self.pen
+    }
+
+    /// The current terminal modes.
+    pub fn modes(&self) -> Modes {
+        self.modes
     }
 
     pub fn pen_mut(&mut self) -> &mut Pen {
@@ -235,16 +284,28 @@ impl Screen {
             // Realise a deferred wrap, or wrap early for a wide glyph that will
             // not fit in the columns left (PRD §16.3 leaves a padding column).
             if self.cursor.pending_wrap() || self.cursor.col() as u32 + w as u32 > cols as u32 {
-                self.autowrap();
+                if self.modes.autowrap {
+                    self.autowrap();
+                } else if w <= cols {
+                    // DECAWM off: the cursor parks in the last cell the glyph
+                    // fits in and every further glyph overwrites it.
+                    let row = self.cursor.row();
+                    self.cursor.move_to(Position::new(row, cols - w));
+                } else {
+                    continue; // wider than the screen: nowhere to put it
+                }
             }
             let row = self.cursor.row();
             let col = self.cursor.col();
             self.put(row, col, cluster, w);
             let new_col = col + w;
             if new_col >= cols {
-                // At the right edge: sit on the last column and defer the wrap.
+                // At the right edge: sit on the last column, and defer the wrap
+                // only if there is going to be one.
                 self.cursor.move_to(Position::new(row, cols - 1));
-                self.cursor.arm_wrap();
+                if self.modes.autowrap {
+                    self.cursor.arm_wrap();
+                }
             } else {
                 self.cursor.move_to(Position::new(row, new_col));
             }
@@ -637,6 +698,14 @@ impl Screen {
             Command::InsertChars(n) => self.insert_chars(*n),
             Command::DeleteChars(n) => self.delete_chars(*n),
             Command::EraseChars(n) => self.erase_chars(*n),
+            Command::SaveCursor => self.save_cursor(),
+            Command::RestoreCursor => self.restore_cursor(),
+            Command::SetModes { modes, enabled } => {
+                for mode in modes {
+                    self.set_mode(*mode, *enabled);
+                }
+            }
+            Command::Reset => self.reset(),
             Command::EraseInDisplay(mode) => self.erase_in_display(*mode),
             Command::EraseInLine(mode) => self.erase_in_line(*mode),
             Command::Sgr(list) => {
@@ -736,6 +805,56 @@ impl Screen {
                 *c = cell.clone();
             }
         }
+    }
+
+    /// DECSC: stash the cursor, its deferred wrap and the pen.
+    pub fn save_cursor(&mut self) {
+        self.saved = Some(SavedCursor {
+            position: self.cursor.position(),
+            pending_wrap: self.cursor.pending_wrap(),
+            pen: self.pen,
+        });
+    }
+
+    /// DECRC: restore what DECSC stashed. With nothing stashed this homes the
+    /// cursor and resets the pen, which is what a VT100 does.
+    pub fn restore_cursor(&mut self) {
+        let saved = self.saved.unwrap_or(SavedCursor {
+            position: Position::new(0, 0),
+            pending_wrap: false,
+            pen: Pen::default(),
+        });
+        self.pen = saved.pen;
+        let pos = self.clamp(saved.position.row, saved.position.col);
+        self.cursor.move_to(pos);
+        if saved.pending_wrap {
+            self.cursor.arm_wrap();
+        }
+    }
+
+    /// Turn a mode on or off.
+    pub fn set_mode(&mut self, mode: Mode, enabled: bool) {
+        match mode {
+            Mode::ApplicationCursorKeys => self.modes.application_cursor_keys = enabled,
+            Mode::ApplicationKeypad => self.modes.application_keypad = enabled,
+            Mode::AutoWrap => self.modes.autowrap = enabled,
+            Mode::CursorVisible => self.modes.cursor_visible = enabled,
+            Mode::BracketedPaste => self.modes.bracketed_paste = enabled,
+        }
+    }
+
+    /// RIS: back to the power-on state — default pen and modes, no saved
+    /// cursor, full-screen margins, cursor home, display cleared.
+    ///
+    /// Scrollback survives. A program resetting the terminal is claiming the
+    /// screen, not erasing the user's history.
+    pub fn reset(&mut self) {
+        self.pen = Pen::default();
+        self.modes = Modes::default();
+        self.saved = None;
+        self.reset_scroll_region();
+        self.cursor.move_to(Position::new(0, 0));
+        self.erase_in_display(EraseMode::All);
     }
 
     /// The scrolling region as inclusive display rows (DECSTBM).
@@ -1462,6 +1581,117 @@ mod tests {
         // Region rows 2..4 (1-based), cursor to the bottom margin, line feed.
         s.advance(&mut p, b"\x1b[2;4r\x1b[4;1H\n");
         assert_eq!(rows_str(&s), ["r0", "r2", "r3", "", "r4"]);
+    }
+
+    #[test]
+    fn save_and_restore_carry_the_pen_with_the_cursor() {
+        let mut s = Screen::new(TerminalSize::new(4, 8));
+        s.cursor_to(2, 3);
+        s.pen_mut().fg = Color::RED;
+        s.pen_mut().attrs.insert(CellAttrs::BOLD);
+        s.save_cursor();
+
+        s.cursor_to(0, 0);
+        *s.pen_mut() = Pen::default();
+        s.restore_cursor();
+
+        assert_eq!(s.cursor().position(), Position::new(2, 3));
+        assert_eq!(s.pen().fg, Color::RED);
+        assert!(s.pen().attrs.contains(CellAttrs::BOLD));
+    }
+
+    #[test]
+    fn restoring_with_nothing_saved_homes_the_cursor_and_resets_the_pen() {
+        let mut s = Screen::new(TerminalSize::new(4, 8));
+        s.cursor_to(2, 3);
+        s.pen_mut().fg = Color::RED;
+        s.restore_cursor();
+        assert_eq!(s.cursor().position(), Position::new(0, 0));
+        assert_eq!(s.pen(), Pen::default());
+    }
+
+    #[test]
+    fn a_saved_cursor_survives_a_shrinking_resize_by_clamping() {
+        let mut s = Screen::new(TerminalSize::new(6, 8));
+        s.cursor_to(5, 7);
+        s.save_cursor();
+        s.resize(TerminalSize::new(3, 8));
+        s.restore_cursor();
+        assert!(s.cursor().position().is_within(s.size()));
+    }
+
+    #[test]
+    fn autowrap_off_overwrites_the_last_column() {
+        let mut s = Screen::new(TerminalSize::new(2, 4));
+        let mut p = VtParser::new();
+        s.advance(&mut p, b"\x1b[?7l");
+        s.print("abcdef");
+        assert_eq!(row_str(&s, 0), "abcf", "the tail piles up on the last cell");
+        assert_eq!(row_str(&s, 1), "");
+        assert_eq!(s.cursor().position(), Position::new(0, 3));
+        assert!(!s.cursor().pending_wrap(), "no wrap is pending to realise");
+    }
+
+    #[test]
+    fn autowrap_back_on_wraps_again() {
+        let mut s = Screen::new(TerminalSize::new(2, 4));
+        let mut p = VtParser::new();
+        s.advance(&mut p, b"\x1b[?7labcd\x1b[?7hef");
+        assert_eq!(row_str(&s, 0), "abce");
+        assert_eq!(row_str(&s, 1), "f");
+    }
+
+    #[test]
+    fn modes_default_to_the_power_on_state() {
+        let s = Screen::new(TerminalSize::new(2, 4));
+        assert_eq!(s.modes(), Modes::default());
+        assert!(s.modes().autowrap);
+        assert!(s.modes().cursor_visible);
+        assert!(!s.modes().application_cursor_keys);
+    }
+
+    #[test]
+    fn mode_sequences_drive_the_engine_state() {
+        let mut s = Screen::new(TerminalSize::new(2, 4));
+        let mut p = VtParser::new();
+        s.advance(&mut p, b"\x1b[?1;2004h\x1b=");
+        assert!(s.modes().application_cursor_keys);
+        assert!(s.modes().bracketed_paste);
+        assert!(s.modes().application_keypad);
+        s.advance(&mut p, b"\x1b[?1l\x1b>");
+        assert!(!s.modes().application_cursor_keys);
+        assert!(!s.modes().application_keypad);
+        assert!(s.modes().bracketed_paste, "untouched modes stay put");
+    }
+
+    #[test]
+    fn reset_returns_to_the_power_on_state_but_keeps_history() {
+        let mut s = numbered(3, 8);
+        s.cursor_to(2, 0);
+        s.line_feed(); // push a line into scrollback
+        s.set_scroll_region(0, Some(1));
+        s.pen_mut().fg = Color::RED;
+        s.cursor_to(1, 2);
+        s.save_cursor();
+        let mut p = VtParser::new();
+        s.advance(&mut p, b"\x1b[?25l\x1bc");
+
+        assert_eq!(s.pen(), Pen::default());
+        assert_eq!(s.modes(), Modes::default());
+        assert_eq!(s.scroll_region(), (0, 2));
+        assert_eq!(s.cursor().position(), Position::new(0, 0));
+        assert_eq!(rows_str(&s), ["", "", ""]);
+        assert_eq!(
+            s.scrollback().len(),
+            1,
+            "history is the user's, not the program's"
+        );
+        s.restore_cursor();
+        assert_eq!(
+            s.cursor().position(),
+            Position::new(0, 0),
+            "the stash is gone too"
+        );
     }
 
     #[test]
