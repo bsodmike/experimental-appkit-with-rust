@@ -110,6 +110,25 @@ the origin at the bottom-left and y increasing upward, which is also what
 compensating transform, and forgetting one draws the text upside down. Row 0 is
 therefore at `viewHeight - cellHeight`, which `Metrics` computes and tests.
 
+### Where the font comes from
+
+**Decision: the font and its default size come from `NSUserDefaults`, and are
+validated in `Glue::Config` before anything believes them.**
+
+`defaults write com.inertialbox.crustty fontSize -int 15` should not require a
+rebuild, and `NSUserDefaults` is the platform's answer to that — no file format
+to invent, no parser to write, no reload story. What arrives is not trusted: a
+size of zero is not a preference, and a named font that is not installed falls
+back to the system monospaced font, which is always present and actually
+monospaced.
+
+**Decision: ⌘+, ⌘− and ⌘0 change the size, and the change is not persisted.**
+Zoom takes the same path a window resize already takes — remeasure the font,
+re-derive the grid, tell the engine — so it costs almost nothing. It is not
+saved because v0 saves nothing at all (§11); the size returns to the default on
+relaunch, and persisting it later is one number in a file that does not exist
+yet.
+
 **Decision: the terminal size is derived from the view, not the other way
 round.** `rows = floor(height / cellHeight)`, `cols = floor(width / cellWidth)`,
 both clamped to at least 1. Leftover pixels are padding at the bottom and right.
@@ -253,6 +272,38 @@ non-copyable, movable, and its destructor is the whole of the cleanup.
 left to deallocation order. `terminal_destroy` joins the reader thread and hangs
 up the shell (PRD §7); it must happen while the view it might wake is still
 alive. The sequence is: destroy the session, then let the window go.
+
+---
+
+### When the shell goes away
+
+**Decision: a clean exit closes the window; anything else keeps it.**
+
+Typing `exit` ends the session and the window goes, which is what Alacritty and
+kitty do and what the gesture means. But a shell that died from an error printed
+that error immediately before dying, and closing the window is the least helpful
+possible response to it. So a non-zero status, or a signal, leaves the last
+frame on screen with the reason in the title.
+
+This is the rule Terminal.app has had for years, and the one Ghostty arrived at
+from the other direction. It is not a compromise between two behaviours; it is
+the behaviour, and the two halves only look separate.
+
+There is a third case this project has and single-process terminals do not: the
+reader thread stopping for reasons of its own, with the shell's fate unknown.
+**That is never treated as a clean exit** — closing the window there would hide
+precisely the case where the engine itself is what broke.
+
+`Glue::present_exit` decides all of it from `TerminalChildStatus`, which is why
+the rule is three comparisons in a tested function rather than three conditions
+scattered through a view.
+
+**Decision: a Debug build draws the engine's own last error on screen.**
+`terminal_copy_last_error` carries the message and location that `catch_unwind`
+would otherwise discard, because "Panicked" on its own is the least debuggable
+state the app can reach. Release builds draw nothing, and **whether the window
+closes never depends on how the app was compiled** — only whether you can read
+why.
 
 ---
 
@@ -400,3 +451,6 @@ that already holds them, which is the point of stopping here.
 | 12 | Notarized direct download; the App Store is out of scope because the sandbox breaks the product |
 | 13 | Hardened Runtime on from the first Release build; ad-hoc signing until a certificate exists |
 | 14 | Tests are tiered by what can be known, and the Linux-testable tier is the large one |
+| 15 | Font and size come from `NSUserDefaults`, validated in `Glue`; zoom is not persisted |
+| 16 | A clean exit closes the window; a crash keeps it, and an unexplained hangup is never read as clean |
+| 17 | Debug builds draw the engine's last error; the closing rule never depends on the build |
