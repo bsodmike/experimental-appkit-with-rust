@@ -1,0 +1,16 @@
+# Cap how many tests run at once.
+#
+# The pty tests each hold four file descriptors while they run -- the pty
+# master, the reader thread's dup of it, and both ends of the interrupt pipe --
+# plus a handful more while a child is being forked. Left unbounded, cargo runs
+# one test per core, and on a machine with a modest RLIMIT_NOFILE the suite
+# starts failing with "Too many open files" in whichever tests happened to be
+# starting at the time. Linux commonly allows 1024 or more; macOS has
+# historically allowed 256, which is where this first showed up.
+#
+# Four is far below any limit worth worrying about, and the whole workspace
+# still runs in well under a second. A test suite that only passes when the
+# ambient limit is generous is a test suite that fails on someone else's
+# machine.
+[env]
+RUST_TEST_THREADS = "4"

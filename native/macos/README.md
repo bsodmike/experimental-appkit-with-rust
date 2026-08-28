@@ -111,6 +111,12 @@ sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 sudo xcodebuild -license accept
 ```
 
+**`Too many open files` in the Rust tests.** Each pty test holds four
+descriptors while it runs, and unbounded parallelism on a machine with a
+modest `RLIMIT_NOFILE` runs out. `.cargo/config.toml` caps the suite at four
+threads for exactly this reason; if you see it anyway, `ulimit -n` will say
+how tight the limit is.
+
 **`cargo: command not found` during an Xcode build.** Xcode's build phases do
 not run your login shell, so they do not have your `PATH`. The pre-build script
 sets it explicitly; if cargo lives somewhere unusual for you, add it there in

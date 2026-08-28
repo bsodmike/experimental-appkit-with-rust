@@ -299,7 +299,14 @@ static PANIC_LOCATION: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(
 fn install_panic_hook() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        std::panic::set_hook(Box::new(|info| {
+        // Chain to whatever was there rather than replacing it. A hook is
+        // process-wide, so a silent one swallows every panic message in the
+        // process -- including the ones libtest installs its own hook to
+        // capture, which turns a failing test into a bare "FAILED" with no
+        // reason attached. The app's stderr is not the PTY's, so letting the
+        // default hook keep writing there costs nothing and reaches Console.
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
             let location = info
                 .location()
                 .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
@@ -307,8 +314,7 @@ fn install_panic_hook() {
             if let Ok(mut slot) = PANIC_LOCATION.lock() {
                 *slot = Some(location);
             }
-            // Deliberately silent: the default hook writes to stderr, and the
-            // frontend reads the message from here instead (PRD §12).
+            previous(info);
         }));
     });
 }
