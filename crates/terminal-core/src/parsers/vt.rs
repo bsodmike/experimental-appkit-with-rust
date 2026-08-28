@@ -43,6 +43,34 @@ pub enum Command {
         row: u16,
         col: u16,
     },
+    /// Absolute column move (CHA/HPA), 0-based.
+    CursorColumn(u16),
+    /// Absolute row move (VPA), 0-based, column unchanged.
+    CursorLine(u16),
+    /// Down one row, scrolling at the bottom margin (IND).
+    Index,
+    /// Up one row, scrolling at the top margin (RI).
+    ReverseIndex,
+    /// Index plus carriage return (NEL).
+    NextLine,
+    /// DECSTBM. `top` is 0-based; `bottom` is 0-based and inclusive, `None`
+    /// meaning the last row. `CSI r` with no parameters resets to the full
+    /// screen, which is `{ top: 0, bottom: None }`.
+    SetScrollRegion {
+        top: u16,
+        bottom: Option<u16>,
+    },
+    /// Scroll the region up (SU) or down (SD), leaving the cursor where it is.
+    ScrollUp(u16),
+    ScrollDown(u16),
+    /// Open (IL) or close (DL) blank rows at the cursor, within the region.
+    InsertLines(u16),
+    DeleteLines(u16),
+    /// Open (ICH) or close (DCH) blank cells on the cursor's row.
+    InsertChars(u16),
+    DeleteChars(u16),
+    /// Overwrite n cells from the cursor with blanks, moving nothing (ECH).
+    EraseChars(u16),
     EraseInDisplay(EraseMode),
     EraseInLine(EraseMode),
     Sgr(Vec<Sgr>),
@@ -186,6 +214,11 @@ fn parse_esc(input: &[u8]) -> IResult<&[u8], Command> {
         None => Err(Err::Incomplete(Needed::new(1))),
         Some(b'[') => parse_csi(&rest[1..]),
         Some(b']') => parse_osc(&rest[1..]),
+        // The single-byte C1 escapes we act on. Anything else falls through to
+        // the generic consumer below.
+        Some(b'D') => Ok((&rest[1..], Command::Index)),
+        Some(b'M') => Ok((&rest[1..], Command::ReverseIndex)),
+        Some(b'E') => Ok((&rest[1..], Command::NextLine)),
         Some(_) => parse_esc_other(rest),
     }
 }
@@ -232,6 +265,14 @@ fn parse_osc(input: &[u8]) -> IResult<&[u8], Command> {
 }
 
 fn dispatch_csi(params_bytes: &[u8], final_b: u8) -> Command {
+    // A private-parameter prefix (`?`, `>`, `=`, `<`) makes the final byte mean
+    // something else entirely -- `CSI ? 25 h` is not `CSI 25 h` -- so those
+    // sequences never reach the standard dispatch below.
+    if let Some(&prefix) = params_bytes.first()
+        && (0x3C..=0x3F).contains(&prefix)
+    {
+        return dispatch_csi_private(prefix, &params_bytes[1..], final_b);
+    }
     let params = parse_params(params_bytes);
     match final_b {
         b'A' => Command::CursorUp(nonzero(param(&params, 0, 1))),
@@ -242,11 +283,36 @@ fn dispatch_csi(params_bytes: &[u8], final_b: u8) -> Command {
             row: nonzero(param(&params, 0, 1)) - 1,
             col: nonzero(param(&params, 1, 1)) - 1,
         },
+        b'G' | b'`' => Command::CursorColumn(nonzero(param(&params, 0, 1)) - 1),
+        b'd' => Command::CursorLine(nonzero(param(&params, 0, 1)) - 1),
+        b'S' => Command::ScrollUp(nonzero(param(&params, 0, 1))),
+        b'T' => Command::ScrollDown(nonzero(param(&params, 0, 1))),
+        b'L' => Command::InsertLines(nonzero(param(&params, 0, 1))),
+        b'M' => Command::DeleteLines(nonzero(param(&params, 0, 1))),
+        b'@' => Command::InsertChars(nonzero(param(&params, 0, 1))),
+        b'P' => Command::DeleteChars(nonzero(param(&params, 0, 1))),
+        b'X' => Command::EraseChars(nonzero(param(&params, 0, 1))),
+        b'r' => Command::SetScrollRegion {
+            top: nonzero(param(&params, 0, 1)) - 1,
+            // An omitted or zero bottom means "the last row", which only the
+            // screen knows; the parser does not invent a height.
+            bottom: match params.get(1).copied().flatten() {
+                Some(0) | None => None,
+                Some(n) => Some(n - 1),
+            },
+        },
         b'J' => Command::EraseInDisplay(erase_mode(param(&params, 0, 0))),
         b'K' => Command::EraseInLine(erase_mode(param(&params, 0, 0))),
         b'm' => Command::Sgr(parse_sgr(&params)),
         _ => Command::Ignored,
     }
+}
+
+/// CSI sequences carrying a private-parameter prefix. None are acted on yet;
+/// they are consumed so the stream advances, and this is where DEC private
+/// modes (DECCKM, DECAWM, DECTCEM) and the alternate screen will land.
+fn dispatch_csi_private(_prefix: u8, _params_bytes: &[u8], _final_b: u8) -> Command {
+    Command::Ignored
 }
 
 /// Split `;`-separated decimal parameters; an empty field is `None` (use the
@@ -408,6 +474,44 @@ mod tests {
     #[case(b"\x1b[5;9f", Command::CursorPosition { row: 4, col: 8 })]
     fn csi_cursor_position(#[case] input: &[u8], #[case] expected: Command) {
         assert_eq!(feed(input), vec![expected]);
+    }
+
+    #[rstest]
+    #[case(b"\x1b[G", Command::CursorColumn(0))]
+    #[case(b"\x1b[9G", Command::CursorColumn(8))]
+    #[case(b"\x1b[9`", Command::CursorColumn(8))]
+    #[case(b"\x1b[4d", Command::CursorLine(3))]
+    #[case(b"\x1bD", Command::Index)]
+    #[case(b"\x1bM", Command::ReverseIndex)]
+    #[case(b"\x1bE", Command::NextLine)]
+    #[case(b"\x1b[S", Command::ScrollUp(1))]
+    #[case(b"\x1b[3S", Command::ScrollUp(3))]
+    #[case(b"\x1b[2T", Command::ScrollDown(2))]
+    #[case(b"\x1b[2L", Command::InsertLines(2))]
+    #[case(b"\x1b[M", Command::DeleteLines(1))]
+    #[case(b"\x1b[3@", Command::InsertChars(3))]
+    #[case(b"\x1b[3P", Command::DeleteChars(3))]
+    #[case(b"\x1b[3X", Command::EraseChars(3))]
+    fn csi_editing_and_index(#[case] input: &[u8], #[case] expected: Command) {
+        assert_eq!(feed(input), vec![expected]);
+    }
+
+    #[rstest]
+    #[case(b"\x1b[r", Command::SetScrollRegion { top: 0, bottom: None })]
+    #[case(b"\x1b[3;10r", Command::SetScrollRegion { top: 2, bottom: Some(9) })]
+    #[case(b"\x1b[5r", Command::SetScrollRegion { top: 4, bottom: None })]
+    #[case(b"\x1b[;10r", Command::SetScrollRegion { top: 0, bottom: Some(9) })]
+    fn csi_scroll_region(#[case] input: &[u8], #[case] expected: Command) {
+        assert_eq!(feed(input), vec![expected]);
+    }
+
+    #[test]
+    fn a_private_prefix_never_reaches_the_standard_dispatch() {
+        // `CSI ? 3 r` is XTRESTORE, not a scroll region, and `CSI ? 1 J` is
+        // DECSED, not an erase. Both are consumed without acting.
+        assert_eq!(feed(b"\x1b[?3r"), vec![]);
+        assert_eq!(feed(b"\x1b[?1J"), vec![]);
+        assert_eq!(feed(b"\x1b[>c"), vec![]);
     }
 
     #[rstest]

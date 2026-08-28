@@ -109,6 +109,12 @@ pub struct Screen {
     /// its last row has not ended yet, so it is not a complete scrollback line.
     /// `None` between logical lines.
     pending: Option<LogicalLine>,
+    /// The scrolling region (DECSTBM), as inclusive display rows. Line feeds at
+    /// `scroll_bottom` scroll the rows between the margins instead of the whole
+    /// screen, which is how full-screen programs keep a status line still.
+    /// Defaults to the whole screen.
+    scroll_top: u16,
+    scroll_bottom: u16,
 }
 
 impl Screen {
@@ -134,6 +140,8 @@ impl Screen {
             pen: Pen::default(),
             next_line_id,
             pending: None,
+            scroll_top: 0,
+            scroll_bottom: size.rows.saturating_sub(1),
         }
     }
 
@@ -255,14 +263,15 @@ impl Screen {
     pub fn line_feed(&mut self) {
         let row = self.cursor.row();
         let col = self.cursor.col();
-        if (row as usize + 1) < self.rows.len() {
+        if row == self.scroll_bottom {
+            // At the bottom margin the text moves, not the cursor.
+            self.scroll_region_up_once(None);
+            self.cursor.move_to(Position::new(row, col));
+        } else if (row as usize + 1) < self.rows.len() {
             self.cursor.move_to(Position::new(row + 1, col));
-        } else {
-            let id = self.alloc_line_id();
-            self.scroll_up(Row::blank(self.size.cols, id));
-            self.cursor
-                .move_to(Position::new(self.size.rows.saturating_sub(1), col));
         }
+        // Below the region on the last row there is nowhere to go: the cursor
+        // stays and nothing scrolls.
     }
 
     /// Soft-wrap the current row into the next: mark it wrapped and move to the
@@ -275,25 +284,76 @@ impl Screen {
             r.set_wrapped(true);
         }
         let Some(line_id) = line_id else { return };
-        if (row as usize + 1) < self.rows.len() {
+        if row == self.scroll_bottom {
+            // The continuation row is the one the scroll opens up, so it must
+            // carry the wrapping line's id rather than a fresh one.
+            self.scroll_region_up_once(Some(line_id));
+            self.cursor.move_to(Position::new(row, 0));
+        } else if (row as usize + 1) < self.rows.len() {
             if let Some(next) = self.rows.get_mut(row as usize + 1) {
                 next.set_line_id(line_id);
                 next.set_wrapped(false);
             }
             self.cursor.move_to(Position::new(row + 1, 0));
-        } else {
-            self.scroll_up(Row::blank(self.size.cols, line_id));
-            self.cursor
-                .move_to(Position::new(self.size.rows.saturating_sub(1), 0));
         }
     }
 
-    /// Remove the top row, freezing it into scrollback, and append `new_bottom`.
-    fn scroll_up(&mut self, new_bottom: Row) {
-        if let Some(top) = self.rows.pop_front() {
-            self.freeze_row(top);
+    /// Whether the scrolling region covers the whole screen, which is the only
+    /// case in which scrolled-off rows join scrollback.
+    ///
+    /// Scrollback is the history of the session, not of a pane: when a program
+    /// has carved out a region (a pager's text area above a status line), rows
+    /// pushed out of that region are that program's business and are dropped.
+    fn region_is_whole_screen(&self) -> bool {
+        self.scroll_top == 0 && self.scroll_bottom as usize + 1 == self.rows.len()
+    }
+
+    /// Insert a blank row at `at`, giving it `line_id` (or a fresh one).
+    ///
+    /// If the row above belongs to a different logical line, its soft-wrap flag
+    /// is cleared: it can no longer be continued by the row below it, and a
+    /// stale flag would mislead reflow.
+    fn insert_blank_row(&mut self, at: usize, line_id: Option<LineId>) {
+        let id = match line_id {
+            Some(id) => id,
+            None => self.alloc_line_id(),
+        };
+        self.rows.insert(at, Row::blank(self.size.cols, id));
+        if at > 0
+            && let Some(prev) = self.rows.get_mut(at - 1)
+            && prev.line_id() != id
+        {
+            prev.set_wrapped(false);
         }
-        self.rows.push_back(new_bottom);
+    }
+
+    /// Scroll the region up by one row: the top row of the region leaves (into
+    /// scrollback only if the region is the whole screen) and a blank row opens
+    /// at the bottom, carrying `line_id` when it continues a wrapped line.
+    fn scroll_region_up_once(&mut self, line_id: Option<LineId>) {
+        let (top, bottom) = (self.scroll_top as usize, self.scroll_bottom as usize);
+        if top > bottom || bottom >= self.rows.len() {
+            return;
+        }
+        let whole = self.region_is_whole_screen();
+        if let Some(row) = self.rows.remove(top)
+            && whole
+        {
+            self.freeze_row(row);
+        }
+        self.insert_blank_row(bottom, line_id);
+    }
+
+    /// Scroll the region down by one row: the bottom row of the region is
+    /// discarded and a blank row opens at the top. Nothing reaches scrollback —
+    /// scrollback is above the screen, and this pushes content the other way.
+    fn scroll_region_down_once(&mut self) {
+        let (top, bottom) = (self.scroll_top as usize, self.scroll_bottom as usize);
+        if top > bottom || bottom >= self.rows.len() {
+            return;
+        }
+        self.rows.remove(bottom);
+        self.insert_blank_row(top, None);
     }
 
     /// Fold a scrolled-off row into scrollback. Consecutive rows of one logical
@@ -440,6 +500,7 @@ impl Screen {
             rows.push_back(Row::blank(new_cols, id));
         }
         self.rows = rows;
+        self.reset_scroll_region();
 
         let (flat_row, col, arm) = cursor_at.unwrap_or((0, 0, false));
         let row = flat_row
@@ -464,6 +525,7 @@ impl Screen {
             rows.push_back(Row::blank(new_size.cols, id));
         }
         self.rows = rows;
+        self.reset_scroll_region();
         self.cursor.move_to(Position::new(0, 0));
     }
 
@@ -556,6 +618,25 @@ impl Screen {
             Command::CursorForward(n) => self.cursor_right(*n),
             Command::CursorBack(n) => self.cursor_left(*n),
             Command::CursorPosition { row, col } => self.cursor_to(*row, *col),
+            Command::CursorColumn(col) => {
+                let row = self.cursor.row();
+                self.cursor_to(row, *col);
+            }
+            Command::CursorLine(row) => {
+                let col = self.cursor.col();
+                self.cursor_to(*row, col);
+            }
+            Command::Index => self.index(),
+            Command::ReverseIndex => self.reverse_index(),
+            Command::NextLine => self.next_line(),
+            Command::SetScrollRegion { top, bottom } => self.set_scroll_region(*top, *bottom),
+            Command::ScrollUp(n) => self.scroll_region_up(*n),
+            Command::ScrollDown(n) => self.scroll_region_down(*n),
+            Command::InsertLines(n) => self.insert_lines(*n),
+            Command::DeleteLines(n) => self.delete_lines(*n),
+            Command::InsertChars(n) => self.insert_chars(*n),
+            Command::DeleteChars(n) => self.delete_chars(*n),
+            Command::EraseChars(n) => self.erase_chars(*n),
             Command::EraseInDisplay(mode) => self.erase_in_display(*mode),
             Command::EraseInLine(mode) => self.erase_in_line(*mode),
             Command::Sgr(list) => {
@@ -655,6 +736,153 @@ impl Screen {
                 *c = cell.clone();
             }
         }
+    }
+
+    /// The scrolling region as inclusive display rows (DECSTBM).
+    pub fn scroll_region(&self) -> (u16, u16) {
+        (self.scroll_top, self.scroll_bottom)
+    }
+
+    /// Set the scrolling region. `bottom` of `None` means the last row.
+    ///
+    /// A region that is empty or reversed is ignored outright (DECSTBM), and a
+    /// valid one homes the cursor. Both are the VT100 behaviour, and programs
+    /// depend on the homing: `CSI r` then `CSI H` is a very common reset.
+    pub fn set_scroll_region(&mut self, top: u16, bottom: Option<u16>) {
+        let last = self.size.rows.saturating_sub(1);
+        let bottom = bottom.unwrap_or(last).min(last);
+        if top >= bottom {
+            return;
+        }
+        self.scroll_top = top;
+        self.scroll_bottom = bottom;
+        self.cursor.move_to(Position::new(0, 0));
+    }
+
+    fn reset_scroll_region(&mut self) {
+        self.scroll_top = 0;
+        self.scroll_bottom = self.size.rows.saturating_sub(1);
+    }
+
+    /// IND: down one row, scrolling the region at the bottom margin. Identical
+    /// to a line feed; it exists because the two arrive as different bytes.
+    pub fn index(&mut self) {
+        self.line_feed();
+    }
+
+    /// RI: up one row, scrolling the region down at the top margin.
+    pub fn reverse_index(&mut self) {
+        let row = self.cursor.row();
+        let col = self.cursor.col();
+        if row == self.scroll_top {
+            self.scroll_region_down_once();
+            self.cursor.move_to(Position::new(row, col));
+        } else if row > 0 {
+            self.cursor.move_to(Position::new(row - 1, col));
+        }
+    }
+
+    /// NEL: a line feed plus a carriage return.
+    pub fn next_line(&mut self) {
+        self.line_feed();
+        self.carriage_return();
+    }
+
+    /// SU: scroll the region up `n` rows, leaving the cursor where it is.
+    pub fn scroll_region_up(&mut self, n: u16) {
+        for _ in 0..n {
+            self.scroll_region_up_once(None);
+        }
+    }
+
+    /// SD: scroll the region down `n` rows, leaving the cursor where it is.
+    pub fn scroll_region_down(&mut self, n: u16) {
+        for _ in 0..n {
+            self.scroll_region_down_once();
+        }
+    }
+
+    /// Whether the cursor sits inside the scrolling region. Line-editing
+    /// commands do nothing when it does not (VT100).
+    fn cursor_in_region(&self) -> bool {
+        let row = self.cursor.row();
+        row >= self.scroll_top && row <= self.scroll_bottom
+    }
+
+    /// IL: open `n` blank rows at the cursor, pushing the rest of the region
+    /// down and off the bottom margin. The cursor moves to column 0.
+    pub fn insert_lines(&mut self, n: u16) {
+        if !self.cursor_in_region() {
+            return;
+        }
+        let at = self.cursor.row() as usize;
+        let bottom = self.scroll_bottom as usize;
+        for _ in 0..n.min((bottom - at + 1) as u16) {
+            self.rows.remove(bottom);
+            self.insert_blank_row(at, None);
+        }
+        self.carriage_return();
+    }
+
+    /// DL: remove `n` rows at the cursor, pulling the rest of the region up and
+    /// opening blanks at the bottom margin. The cursor moves to column 0.
+    pub fn delete_lines(&mut self, n: u16) {
+        if !self.cursor_in_region() {
+            return;
+        }
+        let at = self.cursor.row() as usize;
+        let bottom = self.scroll_bottom as usize;
+        for _ in 0..n.min((bottom - at + 1) as u16) {
+            self.rows.remove(at);
+            self.insert_blank_row(bottom, None);
+        }
+        self.carriage_return();
+    }
+
+    /// ICH: open `n` blank cells at the cursor, shifting the rest of the row
+    /// right; cells pushed past the last column are lost.
+    pub fn insert_chars(&mut self, n: u16) {
+        let cell = self.erase_cell();
+        let col = self.cursor.col() as usize;
+        let Some(row) = self.rows.get_mut(self.cursor.row() as usize) else {
+            return;
+        };
+        let cells = row.cells_mut();
+        let n = (n as usize).min(cells.len().saturating_sub(col));
+        for i in (col + n..cells.len()).rev() {
+            cells[i] = cells[i - n].clone();
+        }
+        for c in &mut cells[col..col + n] {
+            *c = cell.clone();
+        }
+    }
+
+    /// DCH: remove `n` cells at the cursor, shifting the rest of the row left
+    /// and blanking the end.
+    pub fn delete_chars(&mut self, n: u16) {
+        let cell = self.erase_cell();
+        let col = self.cursor.col() as usize;
+        let Some(row) = self.rows.get_mut(self.cursor.row() as usize) else {
+            return;
+        };
+        let cells = row.cells_mut();
+        let n = (n as usize).min(cells.len().saturating_sub(col));
+        let len = cells.len();
+        for i in col..len - n {
+            cells[i] = cells[i + n].clone();
+        }
+        for c in &mut cells[len - n..] {
+            *c = cell.clone();
+        }
+    }
+
+    /// ECH: overwrite `n` cells from the cursor with blanks. Nothing shifts, so
+    /// this is an erase, not a delete.
+    pub fn erase_chars(&mut self, n: u16) {
+        let cell = self.erase_cell();
+        let row = self.cursor.row() as usize;
+        let col = self.cursor.col() as usize;
+        self.fill_row(row, col, col + n as usize, &cell);
     }
 
     /// Erase within the cursor's row (§ CSI K).
@@ -992,6 +1220,248 @@ mod tests {
         assert_eq!(x.content, "X");
         assert_eq!(x.fg, Color::RED);
         assert!(x.attrs.contains(CellAttrs::BOLD));
+    }
+
+    /// A screen whose rows read "r0".."rN", one word per row, cursor left home.
+    fn numbered(rows: u16, cols: u16) -> Screen {
+        let mut s = Screen::new(TerminalSize::new(rows, cols));
+        for r in 0..rows {
+            s.cursor_to(r, 0);
+            s.print(&format!("r{r}"));
+        }
+        s.cursor_to(0, 0);
+        s
+    }
+
+    fn rows_str(s: &Screen) -> Vec<String> {
+        (0..s.size().rows).map(|r| row_str(s, r)).collect()
+    }
+
+    #[test]
+    fn a_new_screen_scrolls_over_its_whole_height() {
+        let s = Screen::new(TerminalSize::new(4, 8));
+        assert_eq!(s.scroll_region(), (0, 3));
+    }
+
+    #[test]
+    fn setting_a_region_homes_the_cursor() {
+        let mut s = Screen::new(TerminalSize::new(6, 8));
+        s.cursor_to(4, 4);
+        s.set_scroll_region(1, Some(3));
+        assert_eq!(s.scroll_region(), (1, 3));
+        assert_eq!(s.cursor().position(), Position::new(0, 0));
+    }
+
+    #[test]
+    fn an_empty_or_reversed_region_is_ignored() {
+        let mut s = Screen::new(TerminalSize::new(6, 8));
+        s.set_scroll_region(3, Some(1));
+        assert_eq!(s.scroll_region(), (0, 5), "reversed: ignored");
+        s.set_scroll_region(2, Some(2));
+        assert_eq!(s.scroll_region(), (0, 5), "single row: ignored");
+        s.set_scroll_region(2, Some(99));
+        assert_eq!(s.scroll_region(), (2, 5), "bottom clamped to the last row");
+    }
+
+    #[test]
+    fn a_line_feed_at_the_bottom_margin_scrolls_only_the_region() {
+        let mut s = numbered(5, 8);
+        s.set_scroll_region(1, Some(3));
+        s.cursor_to(3, 0);
+        s.line_feed();
+        assert_eq!(rows_str(&s), ["r0", "r2", "r3", "", "r4"]);
+        assert_eq!(s.cursor().position(), Position::new(3, 0), "cursor stays");
+    }
+
+    #[test]
+    fn rows_scrolled_out_of_a_partial_region_do_not_reach_scrollback() {
+        // Scrollback is the session's history, not a pane's: a program that
+        // carved out a region owns what falls out of it.
+        let mut s = numbered(5, 8);
+        s.set_scroll_region(1, Some(3));
+        s.cursor_to(3, 0);
+        s.line_feed();
+        assert!(s.scrollback().is_empty());
+        assert!(s.pending_head().is_none());
+    }
+
+    #[test]
+    fn a_whole_screen_region_still_feeds_scrollback() {
+        let mut s = numbered(3, 8);
+        s.cursor_to(2, 0);
+        s.line_feed();
+        assert_eq!(rows_str(&s), ["r1", "r2", ""]);
+        assert_eq!(s.scrollback().len(), 1);
+    }
+
+    #[test]
+    fn a_line_feed_below_the_region_neither_moves_nor_scrolls() {
+        let mut s = numbered(4, 8);
+        s.set_scroll_region(0, Some(2));
+        s.cursor_to(3, 0);
+        s.line_feed();
+        assert_eq!(rows_str(&s), ["r0", "r1", "r2", "r3"]);
+        assert_eq!(s.cursor().position(), Position::new(3, 0));
+    }
+
+    #[test]
+    fn reverse_index_at_the_top_margin_scrolls_the_region_down() {
+        let mut s = numbered(5, 8);
+        s.set_scroll_region(1, Some(3));
+        s.cursor_to(1, 0);
+        s.reverse_index();
+        assert_eq!(rows_str(&s), ["r0", "", "r1", "r2", "r4"]);
+        assert_eq!(s.cursor().position(), Position::new(1, 0));
+    }
+
+    #[test]
+    fn reverse_index_elsewhere_just_moves_up() {
+        let mut s = numbered(4, 8);
+        s.cursor_to(2, 3);
+        s.reverse_index();
+        assert_eq!(s.cursor().position(), Position::new(1, 3));
+        assert_eq!(rows_str(&s), ["r0", "r1", "r2", "r3"]);
+    }
+
+    #[test]
+    fn next_line_feeds_and_returns() {
+        let mut s = numbered(3, 8);
+        s.cursor_to(0, 5);
+        s.next_line();
+        assert_eq!(s.cursor().position(), Position::new(1, 0));
+    }
+
+    #[test]
+    fn autowrap_at_the_bottom_margin_wraps_inside_the_region() {
+        let mut s = Screen::new(TerminalSize::new(4, 3));
+        s.set_scroll_region(1, Some(2));
+        s.cursor_to(2, 0);
+        s.print("abcde");
+        // The wrap scrolls the region, so the tail lands on the bottom margin
+        // and the row above holds the head.
+        assert_eq!(row_str(&s, 1), "abc");
+        assert_eq!(row_str(&s, 2), "de");
+        assert_eq!(
+            s.row(1).unwrap().line_id(),
+            s.row(2).unwrap().line_id(),
+            "both rows belong to the one wrapped logical line"
+        );
+        assert!(s.row(1).unwrap().is_wrapped());
+    }
+
+    #[test]
+    fn scroll_up_and_down_move_text_without_the_cursor() {
+        let mut s = numbered(5, 8);
+        s.set_scroll_region(1, Some(3));
+        s.cursor_to(2, 4);
+        s.scroll_region_up(2);
+        assert_eq!(rows_str(&s), ["r0", "r3", "", "", "r4"]);
+        assert_eq!(s.cursor().position(), Position::new(2, 4));
+        s.scroll_region_down(1);
+        assert_eq!(rows_str(&s), ["r0", "", "r3", "", "r4"]);
+    }
+
+    #[test]
+    fn insert_lines_pushes_the_region_down_and_off_the_margin() {
+        let mut s = numbered(5, 8);
+        s.set_scroll_region(1, Some(3));
+        s.cursor_to(2, 4);
+        s.insert_lines(1);
+        assert_eq!(rows_str(&s), ["r0", "r1", "", "r2", "r4"]);
+        assert_eq!(s.cursor().position(), Position::new(2, 0));
+    }
+
+    #[test]
+    fn delete_lines_pulls_the_region_up_and_blanks_the_margin() {
+        let mut s = numbered(5, 8);
+        s.set_scroll_region(1, Some(3));
+        s.cursor_to(1, 0);
+        s.delete_lines(1);
+        assert_eq!(rows_str(&s), ["r0", "r2", "r3", "", "r4"]);
+        assert!(s.scrollback().is_empty(), "deleted lines are not history");
+    }
+
+    #[test]
+    fn line_editing_outside_the_region_does_nothing() {
+        let mut s = numbered(5, 8);
+        s.set_scroll_region(1, Some(3));
+        s.cursor_to(4, 0);
+        s.insert_lines(2);
+        s.delete_lines(2);
+        assert_eq!(rows_str(&s), ["r0", "r1", "r2", "r3", "r4"]);
+    }
+
+    #[test]
+    fn more_lines_than_the_region_holds_clears_it() {
+        let mut s = numbered(5, 8);
+        s.set_scroll_region(1, Some(3));
+        s.cursor_to(1, 0);
+        s.delete_lines(99);
+        assert_eq!(rows_str(&s), ["r0", "", "", "", "r4"]);
+    }
+
+    #[test]
+    fn insert_and_delete_chars_shift_within_the_row() {
+        let mut s = Screen::new(TerminalSize::new(1, 6));
+        s.print("abcdef");
+        s.cursor_to(0, 1);
+        s.insert_chars(2);
+        assert_eq!(row_str(&s, 0), "a  bcd", "the tail falls off the end");
+        s.cursor_to(0, 1);
+        s.delete_chars(2);
+        assert_eq!(row_str(&s, 0), "abcd");
+    }
+
+    #[test]
+    fn erase_chars_blanks_in_place_without_shifting() {
+        let mut s = Screen::new(TerminalSize::new(1, 6));
+        s.print("abcdef");
+        s.cursor_to(0, 2);
+        s.erase_chars(2);
+        assert_eq!(row_str(&s, 0), "ab  ef");
+    }
+
+    #[test]
+    fn character_editing_clamps_to_the_row() {
+        let mut s = Screen::new(TerminalSize::new(1, 4));
+        s.print("abcd");
+        s.cursor_to(0, 2);
+        s.insert_chars(99);
+        assert_eq!(row_str(&s, 0), "ab");
+        s.cursor_to(0, 0);
+        s.delete_chars(99);
+        assert_eq!(row_str(&s, 0), "");
+        s.erase_chars(99);
+        assert_eq!(row_str(&s, 0), "");
+    }
+
+    #[test]
+    fn character_editing_uses_the_erase_background() {
+        let mut s = Screen::new(TerminalSize::new(1, 4));
+        s.print("ab");
+        s.pen_mut().bg = Color::BLUE;
+        s.cursor_to(0, 0);
+        s.insert_chars(1);
+        assert_eq!(s.cell(Position::new(0, 0)).unwrap().bg, Color::BLUE);
+    }
+
+    #[test]
+    fn a_resize_resets_the_scrolling_region() {
+        // The margins are display coordinates; after a reflow they no longer
+        // mean what the program that set them intended.
+        let mut s = numbered(5, 8);
+        s.set_scroll_region(1, Some(3));
+        s.resize(TerminalSize::new(4, 8));
+        assert_eq!(s.scroll_region(), (0, 3));
+    }
+
+    #[test]
+    fn a_region_scroll_drives_from_bytes() {
+        let mut s = numbered(5, 8);
+        let mut p = VtParser::new();
+        // Region rows 2..4 (1-based), cursor to the bottom margin, line feed.
+        s.advance(&mut p, b"\x1b[2;4r\x1b[4;1H\n");
+        assert_eq!(rows_str(&s), ["r0", "r2", "r3", "", "r4"]);
     }
 
     #[test]
