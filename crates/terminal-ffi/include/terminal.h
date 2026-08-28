@@ -131,6 +131,14 @@ typedef struct TerminalBytes {
 } TerminalBytes;
 
 /**
+ * One environment variable for the child process.
+ */
+typedef struct TerminalEnvPair {
+    struct TerminalBytes key;
+    struct TerminalBytes value;
+} TerminalEnvPair;
+
+/**
  * Everything needed to start a terminal.
  */
 typedef struct TerminalConfig {
@@ -145,6 +153,22 @@ typedef struct TerminalConfig {
      */
     const struct TerminalBytes *args;
     uint32_t args_len;
+    /**
+     * The directory the shell starts in. An empty buffer means the user's home
+     * directory, which is what an app bundle wants — its own working directory
+     * is `/`.
+     */
+    struct TerminalBytes cwd;
+    /**
+     * Extra environment variables, applied over the inherited environment and
+     * over the engine's own defaults. May be null when `env_len` is zero.
+     *
+     * `TERM` and `COLORTERM` are set by the engine whether or not they appear
+     * here: what `TERM` names is the engine's capability statement, not the
+     * frontend's decoration. Listing them here overrides that.
+     */
+    const struct TerminalEnvPair *env;
+    uint32_t env_len;
     /**
      * The wake-up callback, or null for none. Spelled out rather than written
      * as `Option<TerminalWakeUpFn>`, which cbindgen renders as an opaque

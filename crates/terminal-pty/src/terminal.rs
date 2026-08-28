@@ -20,7 +20,7 @@ use std::time::Duration;
 use terminal_core::prelude::{Frame, Key, Modifiers, Session, TerminalSize};
 
 use crate::interrupt::Interrupt;
-use crate::pty::Pty;
+use crate::pty::{Pty, SpawnOptions};
 
 /// How long a child gets to honour `SIGHUP` before it is killed.
 const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
@@ -55,7 +55,19 @@ impl Terminal {
         size: TerminalSize,
         wake_up: impl Fn() + Send + Sync + 'static,
     ) -> io::Result<Self> {
-        let pty = Pty::spawn(program, args, size)?;
+        let options = SpawnOptions::new(program.as_ref()).args(args.iter().map(AsRef::as_ref));
+        Self::spawn_with(&options, size, wake_up)
+    }
+
+    /// Spawn with full control over the child's environment and directory —
+    /// what a frontend uses, since an app bundle's own environment is not one a
+    /// shell can work in.
+    pub fn spawn_with(
+        options: &SpawnOptions,
+        size: TerminalSize,
+        wake_up: impl Fn() + Send + Sync + 'static,
+    ) -> io::Result<Self> {
+        let pty = Pty::spawn_with(options, size)?;
         let mut reader_handle = pty.try_clone_handle()?;
         let session = Session::with_wake_up(size, wake_up);
         let interrupt = Interrupt::new()?;

@@ -20,7 +20,7 @@ use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use terminal_core::prelude::{Frame, Key, Keypad, Modifiers, TerminalSize};
-use terminal_pty::Terminal;
+use terminal_pty::{SpawnOptions, Terminal};
 
 /// The terminal, as C sees it: a token it stores and hands back, and never
 /// dereferences.
@@ -177,6 +177,14 @@ pub struct TerminalKeyEvent {
 /// thread to redraw. `ctx` is handed back untouched (PRD §4.4).
 pub type TerminalWakeUpFn = extern "C" fn(ctx: *mut c_void);
 
+/// One environment variable for the child process.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct TerminalEnvPair {
+    pub key: TerminalBytes,
+    pub value: TerminalBytes,
+}
+
 /// Everything needed to start a terminal.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -188,6 +196,18 @@ pub struct TerminalConfig {
     /// is zero.
     pub args: *const TerminalBytes,
     pub args_len: u32,
+    /// The directory the shell starts in. An empty buffer means the user's home
+    /// directory, which is what an app bundle wants — its own working directory
+    /// is `/`.
+    pub cwd: TerminalBytes,
+    /// Extra environment variables, applied over the inherited environment and
+    /// over the engine's own defaults. May be null when `env_len` is zero.
+    ///
+    /// `TERM` and `COLORTERM` are set by the engine whether or not they appear
+    /// here: what `TERM` names is the engine's capability statement, not the
+    /// frontend's decoration. Listing them here overrides that.
+    pub env: *const TerminalEnvPair,
+    pub env_len: u32,
     /// The wake-up callback, or null for none. Spelled out rather than written
     /// as `Option<TerminalWakeUpFn>`, which cbindgen renders as an opaque
     /// struct C cannot fill in — the header is generated precisely so that
@@ -280,11 +300,51 @@ pub unsafe extern "C" fn terminal_create(config: *const TerminalConfig) -> *mut 
             }
         }
 
+        let Some(cwd) = (unsafe { as_slice(config.cwd) }) else {
+            return std::ptr::null_mut();
+        };
+        let Ok(cwd) = std::str::from_utf8(cwd) else {
+            return std::ptr::null_mut();
+        };
+
+        let mut env: Vec<(String, String)> = Vec::new();
+        if config.env_len > 0 {
+            if config.env.is_null() {
+                return std::ptr::null_mut();
+            }
+            let raw = unsafe { std::slice::from_raw_parts(config.env, config.env_len as usize) };
+            for pair in raw {
+                let (Some(key), Some(value)) = (unsafe { as_slice(pair.key) }, unsafe {
+                    as_slice(pair.value)
+                }) else {
+                    return std::ptr::null_mut();
+                };
+                match (std::str::from_utf8(key), std::str::from_utf8(value)) {
+                    (Ok(k), Ok(v)) if !k.is_empty() => env.push((k.to_string(), v.to_string())),
+                    _ => return std::ptr::null_mut(),
+                }
+            }
+        }
+
+        let mut options = SpawnOptions::new(program).args(args);
+        // An empty cwd means home. The frontend should not have to work out
+        // what "home" is, and an app bundle's own directory is `/`.
+        match cwd {
+            "" => {
+                if let Some(home) = std::env::var_os("HOME") {
+                    options = options.cwd(home);
+                }
+            }
+            dir => options = options.cwd(dir),
+        }
+        for (key, value) in env {
+            options = options.env(key, value);
+        }
+
         let ctx = WakeContext(config.wake_up_ctx);
         let wake_up = config.wake_up;
         let size = TerminalSize::new(config.size.rows, config.size.cols);
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let terminal = Terminal::spawn(program, &args, size, move || {
+        let terminal = Terminal::spawn_with(&options, size, move || {
             if let Some(wake_up) = wake_up {
                 wake_up(ctx.ptr());
             }
@@ -632,6 +692,11 @@ mod tests {
         }
     }
 
+    const NO_BYTES: TerminalBytes = TerminalBytes {
+        bytes: std::ptr::null(),
+        len: 0,
+    };
+
     /// A configuration running `/bin/sh -c script`, with no wake-up.
     fn config(script: &str, args: &mut Vec<TerminalBytes>) -> TerminalConfig {
         args.push(bytes("-c"));
@@ -641,6 +706,9 @@ mod tests {
             program: bytes("/bin/sh"),
             args: args.as_ptr(),
             args_len: args.len() as u32,
+            cwd: NO_BYTES,
+            env: std::ptr::null(),
+            env_len: 0,
             wake_up: None,
             wake_up_ctx: std::ptr::null_mut(),
         }
@@ -888,12 +956,83 @@ mod tests {
             program: bytes("/bin/sh"),
             args: args.as_mut_ptr(),
             args_len: args.len() as u32,
+            cwd: NO_BYTES,
+            env: std::ptr::null(),
+            env_len: 0,
             wake_up: Some(count_wake_up),
             wake_up_ctx: &WAKE_UPS as *const AtomicUsize as *mut c_void,
         };
         let handle = Handle(unsafe { terminal_create(&config) });
         assert!(!handle.0.is_null());
         wait_for("a wake-up", || WAKE_UPS.load(Ordering::SeqCst) > 0);
+    }
+
+    #[test]
+    fn an_empty_cwd_starts_the_shell_at_home() {
+        // An app bundle's own working directory is `/`, which is not where
+        // anybody wants a shell to open.
+        let (handle, _args) = spawn("printf '%s' \"$PWD\"");
+        wait_for("the shell to hang up", || hung_up(&handle));
+        let home = std::env::var("HOME").expect("HOME");
+        assert_eq!(copy_frame(&handle).2, home);
+    }
+
+    #[test]
+    fn a_given_cwd_is_where_the_shell_starts() {
+        let mut args = Vec::new();
+        let mut config = config("printf '%s' \"$PWD\"", &mut args);
+        config.cwd = bytes("/usr");
+        let handle = Handle(unsafe { terminal_create(&config) });
+        assert!(!handle.0.is_null());
+        wait_for("the shell to hang up", || hung_up(&handle));
+        assert_eq!(copy_frame(&handle).2, "/usr");
+    }
+
+    #[test]
+    fn the_engine_names_the_terminal_and_the_frontend_can_still_override_it() {
+        let (handle, _args) = spawn("printf '%s' \"$TERM\"");
+        wait_for("the shell to hang up", || hung_up(&handle));
+        assert_eq!(copy_frame(&handle).2, "xterm-256color");
+
+        let mut args = Vec::new();
+        let mut config = config("printf '%s|%s' \"$TERM\" \"$GRILL\"", &mut args);
+        let env = [
+            TerminalEnvPair {
+                key: bytes("TERM"),
+                value: bytes("dumb"),
+            },
+            TerminalEnvPair {
+                key: bytes("GRILL"),
+                value: bytes("set"),
+            },
+        ];
+        config.env = env.as_ptr();
+        config.env_len = env.len() as u32;
+        let handle = Handle(unsafe { terminal_create(&config) });
+        assert!(!handle.0.is_null());
+        wait_for("the shell to hang up", || hung_up(&handle));
+        assert_eq!(copy_frame(&handle).2, "dumb|set");
+    }
+
+    #[test]
+    fn a_malformed_environment_is_refused_rather_than_half_applied() {
+        let mut args = Vec::new();
+        let mut empty_key = config("true", &mut args);
+        let env = [TerminalEnvPair {
+            key: NO_BYTES,
+            value: bytes("orphan"),
+        }];
+        empty_key.env = env.as_ptr();
+        empty_key.env_len = env.len() as u32;
+        assert!(
+            unsafe { terminal_create(&empty_key) }.is_null(),
+            "an empty key names nothing"
+        );
+
+        let mut args = Vec::new();
+        let mut null_array = config("true", &mut args);
+        null_array.env_len = 1; // ...but the array is null
+        assert!(unsafe { terminal_create(&null_array) }.is_null());
     }
 
     #[test]

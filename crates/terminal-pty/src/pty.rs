@@ -1,11 +1,86 @@
 //! The pty itself: a descriptor, a child process, and a window size.
 
+use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
+use std::path::PathBuf;
 use std::process::Child;
 
 use terminal_core::prelude::TerminalSize;
 
 use crate::interrupt::Interrupt;
+
+/// What `TERM` the engine claims to be.
+///
+/// This is the engine's own capability statement, not the frontend's decoration
+/// (PRD §5): programs look the name up in terminfo to decide what sequences they
+/// may send, so it has to agree with what the VT parser actually implements.
+/// `xterm-256color` is the pragmatic choice every terminal makes — it is present
+/// on every machine, where a bespoke terminfo entry would have to be installed
+/// first — and it promises a little more than we implement today (mouse
+/// reporting, DCS). A caller who knows better can override it.
+pub const DEFAULT_TERM: &str = "xterm-256color";
+
+/// Advertises 24-bit colour, which the engine does support: SGR 38/48;2;r;g;b
+/// round-trips through the parser and out through the render runs.
+pub const DEFAULT_COLORTERM: &str = "truecolor";
+
+/// How to start the child process.
+///
+/// An app bundle launched from Finder has almost no environment — no `TERM`, a
+/// stub `PATH` — so a shell started from one needs to be told where it is and
+/// what it is talking to, or `vim` and `less` refuse to run.
+#[derive(Clone, Debug, Default)]
+pub struct SpawnOptions {
+    program: OsString,
+    args: Vec<OsString>,
+    cwd: Option<PathBuf>,
+    env: Vec<(OsString, OsString)>,
+}
+
+impl SpawnOptions {
+    /// Run `program`, inheriting this process's environment and directory.
+    pub fn new(program: impl Into<OsString>) -> Self {
+        Self {
+            program: program.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Append one argument. A login shell wants `-l`, which is what rebuilds
+    /// `PATH` from the user's profile when the app was launched from Finder.
+    pub fn arg(mut self, arg: impl Into<OsString>) -> Self {
+        self.args.push(arg.into());
+        self
+    }
+
+    pub fn args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<OsString>,
+    {
+        self.args.extend(args.into_iter().map(Into::into));
+        self
+    }
+
+    /// The directory the child starts in. Left unset, it inherits this
+    /// process's — which for an app bundle is `/`, so a frontend will want to
+    /// say otherwise.
+    pub fn cwd(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.cwd = Some(dir.into());
+        self
+    }
+
+    /// Set one environment variable, overriding both the inherited value and
+    /// the defaults above.
+    pub fn env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
+        self.env.push((key.into(), value.into()));
+        self
+    }
+
+    pub fn program(&self) -> &OsStr {
+        &self.program
+    }
+}
 
 /// A pseudo-terminal with a child process running on the far end.
 ///
@@ -114,24 +189,40 @@ impl PtyHandle {
 }
 
 impl Pty {
-    /// Spawn `program` with `args` on a new pty of `size`.
+    /// Spawn `program` with `args` on a new pty of `size`, inheriting this
+    /// process's environment and directory.
     ///
     /// The child becomes the leader of its own session with the pty as its
     /// controlling terminal, which is what makes job control, `Ctrl+C` and
     /// `isatty()` behave the way a shell expects.
-    pub fn spawn<S: AsRef<std::ffi::OsStr>>(
-        program: S,
-        args: &[S],
-        size: TerminalSize,
-    ) -> io::Result<Self> {
+    pub fn spawn<S: AsRef<OsStr>>(program: S, args: &[S], size: TerminalSize) -> io::Result<Self> {
+        let options = SpawnOptions::new(program.as_ref()).args(args.iter().map(AsRef::as_ref));
+        Self::spawn_with(&options, size)
+    }
+
+    /// Spawn with full control over the child's environment and directory.
+    ///
+    /// [`DEFAULT_TERM`] and [`DEFAULT_COLORTERM`] are always set, before the
+    /// caller's own entries, so a frontend gets a working terminal without
+    /// having to know the answer — and can still override it if it does.
+    pub fn spawn_with(options: &SpawnOptions, size: TerminalSize) -> io::Result<Self> {
         let (pty, pts) = pty_process::blocking::open().map_err(io::Error::other)?;
         // Set the size before the child starts, so it never sees the 0x0 that a
         // fresh pty reports and lays itself out for a screen that never was.
         pty.resize(to_pty_size(size)).map_err(io::Error::other)?;
-        let child = pty_process::blocking::Command::new(program)
-            .args(args.iter())
-            .spawn(pts)
-            .map_err(io::Error::other)?;
+
+        let mut command = pty_process::blocking::Command::new(&options.program)
+            .args(options.args.iter())
+            .env("TERM", DEFAULT_TERM)
+            .env("COLORTERM", DEFAULT_COLORTERM);
+        for (key, value) in &options.env {
+            command = command.env(key, value);
+        }
+        if let Some(cwd) = &options.cwd {
+            command = command.current_dir(cwd);
+        }
+
+        let child = command.spawn(pts).map_err(io::Error::other)?;
         Ok(Self {
             handle: PtyHandle(pty),
             child,
@@ -338,6 +429,60 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100)); // let the trap be set
         pty.shutdown(Duration::from_millis(100)).expect("shutdown");
         assert!(pty.child_has_exited().expect("wait"));
+    }
+
+    #[test]
+    fn the_child_is_told_what_terminal_it_is_talking_to() {
+        // Without this an app launched from Finder gives its shell no TERM at
+        // all, and vim, less and top refuse to start.
+        let mut pty = sh(
+            "printf '%s|%s' \"$TERM\" \"$COLORTERM\"",
+            TerminalSize::new(24, 80),
+        );
+        assert_eq!(read_to_end(&mut pty), "xterm-256color|truecolor");
+    }
+
+    #[test]
+    fn a_caller_can_override_the_defaults() {
+        let options = SpawnOptions::new("/bin/sh")
+            .arg("-c")
+            .arg("printf '%s' \"$TERM\"")
+            .env("TERM", "dumb");
+        let mut pty = Pty::spawn_with(&options, TerminalSize::new(24, 80)).expect("spawn");
+        assert_eq!(read_to_end(&mut pty), "dumb");
+    }
+
+    #[test]
+    fn extra_environment_reaches_the_child() {
+        let options = SpawnOptions::new("/bin/sh")
+            .args(["-c", "printf '%s' \"$GRILL_TEST\""])
+            .env("GRILL_TEST", "hello");
+        let mut pty = Pty::spawn_with(&options, TerminalSize::new(24, 80)).expect("spawn");
+        assert_eq!(read_to_end(&mut pty), "hello");
+    }
+
+    #[test]
+    fn the_child_starts_in_the_directory_it_was_given() {
+        let options = SpawnOptions::new("/bin/sh").args(["-c", "pwd"]).cwd("/usr");
+        let mut pty = Pty::spawn_with(&options, TerminalSize::new(24, 80)).expect("spawn");
+        assert_eq!(read_to_end(&mut pty).trim(), "/usr");
+    }
+
+    #[test]
+    fn without_a_directory_the_child_inherits_ours() {
+        let options = SpawnOptions::new("/bin/sh").args(["-c", "pwd"]);
+        let mut pty = Pty::spawn_with(&options, TerminalSize::new(24, 80)).expect("spawn");
+        let expected = std::env::current_dir().expect("cwd");
+        assert_eq!(read_to_end(&mut pty).trim(), expected.to_str().unwrap());
+    }
+
+    #[test]
+    fn the_rest_of_the_environment_is_still_inherited() {
+        // Setting TERM must not mean starting from an empty environment: PATH,
+        // HOME and the rest still have to be there.
+        let mut pty = sh("printf '%s' \"$HOME\"", TerminalSize::new(24, 80));
+        let expected = std::env::var("HOME").expect("HOME");
+        assert_eq!(read_to_end(&mut pty), expected);
     }
 
     #[test]

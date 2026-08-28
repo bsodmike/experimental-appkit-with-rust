@@ -33,12 +33,19 @@ static TerminalBytes str(const char *s) {
 
 int main(void) {
     TerminalBytes args[2] = {str("-c"), str("printf 'hello from C'")};
+    TerminalEnvPair env[1] = {{str("GRILL_SMOKE"), str("1")}};
+    /* Zero-initialised, so a field added to the struct later is empty rather
+     * than whatever was on the stack. */
     TerminalConfig config;
+    memset(&config, 0, sizeof config);
     config.size.rows = 10;
     config.size.cols = 40;
     config.program = str("/bin/sh");
     config.args = args;
     config.args_len = 2;
+    config.cwd = str("/tmp");
+    config.env = env;
+    config.env_len = 1;
     config.wake_up = wake_up;
     config.wake_up_ctx = NULL;
 
