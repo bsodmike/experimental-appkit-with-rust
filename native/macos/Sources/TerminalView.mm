@@ -323,6 +323,14 @@ static void CrusttyWakeUp(void *ctx) {
         return;
     }
 
+    // CTFontDrawGlyphs paints with the context's fill colour. The foreground
+    // attribute below only takes effect when CTLineDraw does the drawing, and
+    // this deliberately does not (PRD-mac §5) -- so without this line every
+    // glyph is drawn in whatever colour was last set, which is the window
+    // background, and the text is perfectly invisible.
+    CGContextSetRGBFillColor(ctx, colors.fg.r / 255.0, colors.fg.g / 255.0, colors.fg.b / 255.0,
+                             colors.fg.a / 255.0);
+
     CGColorRef color = CGColorCreateGenericRGB(colors.fg.r / 255.0, colors.fg.g / 255.0,
                                                colors.fg.b / 255.0, colors.fg.a / 255.0);
     NSDictionary *attributes = @{
