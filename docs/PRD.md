@@ -401,6 +401,15 @@ modifiers" and applies terminal rules (DECCKM changes what the arrow keys emit;
 DECKPAM changes the keypad), or it receives finished UTF-8 text and passes it
 through.
 
+**Implemented.** `terminal-core`'s `keys` module encodes the key channel:
+`encode_key(key, modifiers, modes)` covers the cursor keys (DECCKM), the keypad
+(DECKPAM), function keys, `Ctrl`/`Alt` combinations and the xterm modifier
+parameter, and `encode_paste` frames a paste. `Session::encode_key` reads the
+modes under the lock; `Terminal::send_key` / `send_text` / `paste` put the bytes
+on the pty. The pasted text has any `CSI 201~` stripped before bracketing —
+otherwise pasted content could close the bracket early and have its remainder
+treated as typing, which is what bracketed paste exists to prevent.
+
 The IME rule specifically: while composition is active, the view displays marked
 text itself and sends **nothing**. On commit, `insertText:` fires once and the
 committed text crosses as UTF-8.
