@@ -200,7 +200,7 @@ impl VtParser {
                 })
                 .sum();
             tracing::info!(
-                target: "crustty::vt",
+                target: "terminal-core::vt",
                 fed = bytes.len(),
                 commands = out.len(),
                 printable = printed,

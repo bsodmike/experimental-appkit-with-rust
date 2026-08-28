@@ -116,12 +116,12 @@ just logs        # tail -f the current run
 ```
 
 ```
-INFO crustty::pty: shell started on a new pty program=/bin/zsh pid=13324 rows=24 cols=80
-INFO feed{seq=1}: crustty::session: read from the pty bytes=42 preview=\e]0;~\a%
-INFO feed{seq=1}: crustty::vt: decoded fed=42 commands=6 printable=12 pending=0
-INFO feed{seq=1}: crustty::screen: applied applied=6 cursor=0,12 scrollback=0 alternate=false
-INFO feed{seq=1}: crustty::session: waking the ui
-INFO crustty::render: frame copied for the ui runs=1 text=12 cursor=0,12
+INFO terminal-pty: shell started on a new pty program=/bin/zsh pid=13324 rows=24 cols=80
+INFO feed{seq=1}: terminal-core::session: read from the pty bytes=42 preview=\e]0;~\a%
+INFO feed{seq=1}: terminal-core::vt: decoded fed=42 commands=6 printable=12 pending=0
+INFO feed{seq=1}: terminal-core::screen: applied applied=6 cursor=0,12 scrollback=0 alternate=false
+INFO feed{seq=1}: terminal-core::session: waking the ui
+INFO terminal-core::render: frame copied for the ui runs=1 text=12 cursor=0,12
 ```
 
 Each chunk read from the shell gets a `feed{seq=N}` span, so one burst of output
@@ -133,9 +133,14 @@ from drowning the main thread.
 `log-dir` in the config file does the same thing without the environment
 variable, and `RUST_LOG` changes the level:
 
+Targets are the package the event came from, so `RUST_LOG` selects by crate or
+by module within one:
+
 ```sh
-RUST_LOG=warn just run          # quiet
-RUST_LOG=crustty::vt=info just run   # only the parser
+RUST_LOG=warn just run                     # quiet
+RUST_LOG=terminal-pty=info just run        # only the pty and the reader thread
+RUST_LOG=terminal-core=info just run       # the engine: parser, screen, session, render
+RUST_LOG=terminal-core::vt=info just run   # only the parser
 ```
 
 Logging is off unless asked for, and never writes to stderr — a terminal's

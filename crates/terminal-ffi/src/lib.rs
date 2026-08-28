@@ -427,7 +427,7 @@ fn init_logging(dir: &std::path::Path) -> std::io::Result<()> {
         .with_env_filter(filter)
         .init();
 
-    tracing::info!(target: "crustty::ffi", path = %path.display(), "logging started");
+    tracing::info!(target: "terminal-ffi", path = %path.display(), "logging started");
     Ok(())
 }
 
@@ -585,7 +585,7 @@ pub unsafe extern "C" fn terminal_send_text(
         let Some(text) = (unsafe { as_slice(TerminalBytes { bytes, len }) }) else {
             return TerminalStatus::InvalidArgument;
         };
-        tracing::info!(target: "crustty::ffi", bytes = text.len(), "send_text");
+        tracing::info!(target: "terminal-ffi", bytes = text.len(), "send_text");
         match session.terminal.send(text) {
             Ok(()) => TerminalStatus::Ok,
             Err(_) => TerminalStatus::IoError,
@@ -611,7 +611,7 @@ pub unsafe extern "C" fn terminal_send_key(
             return TerminalStatus::InvalidArgument;
         };
         tracing::info!(
-            target: "crustty::ffi",
+            target: "terminal-ffi",
             key = ?event.code,
             modifiers = event.modifiers,
             "send_key"
@@ -670,7 +670,7 @@ pub unsafe extern "C" fn terminal_resize(
         if rows == 0 || cols == 0 {
             return TerminalStatus::InvalidArgument;
         }
-        tracing::info!(target: "crustty::ffi", rows, cols, "resize");
+        tracing::info!(target: "terminal-ffi", rows, cols, "resize");
         match session.terminal.resize(TerminalSize::new(rows, cols)) {
             Ok(()) => TerminalStatus::Ok,
             Err(_) => TerminalStatus::IoError,

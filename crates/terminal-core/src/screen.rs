@@ -835,7 +835,7 @@ impl Screen {
         if applied > 0 {
             let cursor = self.cursor.position();
             tracing::info!(
-                target: "crustty::screen",
+                target: "terminal-core::screen",
                 applied,
                 cursor = %format_args!("{},{}", cursor.row, cursor.col),
                 scrollback = self.scrollback.len(),

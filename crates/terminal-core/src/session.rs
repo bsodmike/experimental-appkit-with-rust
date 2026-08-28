@@ -111,7 +111,7 @@ impl Session {
         let span = tracing::info_span!("feed", seq);
         let _entered = span.enter();
         tracing::info!(
-            target: "crustty::session",
+            target: "terminal-core::session",
             bytes = bytes.len(),
             preview = %preview(bytes),
             "read from the pty"
@@ -124,7 +124,7 @@ impl Session {
         };
         if !replies.is_empty() {
             tracing::info!(
-                target: "crustty::session",
+                target: "terminal-core::session",
                 bytes = replies.len(),
                 preview = %preview(&replies),
                 "owed back to the program"
@@ -148,7 +148,7 @@ impl Session {
         self.lock().screen.render_into(frame);
         if was_dirty {
             tracing::info!(
-                target: "crustty::render",
+                target: "terminal-core::render",
                 runs = frame.runs().len(),
                 text = frame.text().len(),
                 cursor = %format_args!("{},{}", frame.cursor().row, frame.cursor().col),
@@ -218,7 +218,7 @@ impl Session {
         if !self.shared.dirty.swap(true, Ordering::AcqRel) && self.is_running() {
             // Only this edge wakes the UI. Everything after it in a burst is
             // absorbed, which is the single most important thing this log shows.
-            tracing::info!(target: "crustty::session", "waking the ui");
+            tracing::info!(target: "terminal-core::session", "waking the ui");
             (self.shared.wake_up)();
         }
     }
