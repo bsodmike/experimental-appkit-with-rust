@@ -727,6 +727,14 @@ Prefer this to `cdylib`: a static library needs no `@rpath` configuration, no
 separately code-signed dylib inside the bundle, and no runtime loader path to get
 wrong at distribution time.
 
+**Implemented.** `crates/terminal-ffi` builds as `staticlib` plus `lib` (the
+second so the boundary can be tested from Rust), and its `build.rs` runs
+cbindgen into `crates/terminal-ffi/include/terminal.h`. Generating it caught a
+defect on the first run: `Option<TerminalWakeUpFn>` rendered as an opaque struct
+C could not fill in. `examples/smoke.c` plus `examples/run-smoke.sh` link a C
+program against the library and exercise the whole boundary on Linux. The rest
+is in `docs/adrs/2026-08-28.adr-c-boundary.md`.
+
 ### The pipeline
 
 ```
@@ -1098,10 +1106,10 @@ trailer, so the history reads as a sequence of self-contained, verified steps.
 testable with nothing but a compiler. `terminal-pty` (added 2026-08-28) holds
 the pseudo-terminal, the child process and the reader thread — Rust's by §5, but
 POSIX, so kept out of the engine; it depends on `terminal-core` and never the
-reverse. The FFI layer — the `staticlib` plus the cbindgen-generated header of
-§14 — becomes a separate `terminal-ffi` crate when the boundary is first
-crossed, so that the engine crate never gains a build step or a dependency that
-would compromise its headless testability.
+reverse. `terminal-ffi` (added 2026-08-28) is the `staticlib` plus the
+cbindgen-generated header of §14, and the only crate that speaks C — so the
+engine crate never gains a build step or a dependency that would compromise its
+headless testability.
 
 ---
 
