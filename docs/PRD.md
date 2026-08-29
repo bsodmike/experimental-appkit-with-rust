@@ -1119,6 +1119,10 @@ message or a conversation is a design that has already started to rot.
 **One commit per increment**, with a conventional message and a `Co-Authored-By`
 trailer, so the history reads as a sequence of self-contained, verified steps.
 
+This section is the *process*. The commands that carry it out — what runs in a
+container, what needs a Mac, and in what order — are in the repository's
+`README.md`, and `just --list` is the authoritative list of them.
+
 **Crate layout.** `terminal-core` is the pure engine: no platform dependency,
 testable with nothing but a compiler. `terminal-pty` (added 2026-08-28) holds
 the pseudo-terminal, the child process and the reader thread — Rust's by §5, but

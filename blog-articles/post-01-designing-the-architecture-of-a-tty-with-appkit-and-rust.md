@@ -199,7 +199,7 @@ about macOS. Between them, a C ABI narrow enough to hold in your head.
    │  native/macos/Glue       plain C++, no AppKit          │
    │    key mapping, colour resolution, cell metrics        │
    ├══════════════════ THE WAIST ═══════════════════════════┤
-   │  terminal-ffi            12 extern "C" functions       │
+   │  terminal-ffi            13 extern "C" functions       │
    │    opaque handle, repr(C) structs, byte buffers        │
    ├────────────────────────────────────────────────────────┤
    │  terminal-pty            POSIX: pty, fork, reader      │
@@ -280,7 +280,7 @@ descriptors — the pty and a pipe nobody writes to except at shutdown:
 
 ### terminal-ffi — the waist
 
-Twelve `extern "C"` functions and four kinds of thing that may cross:
+Thirteen `extern "C"` functions and four kinds of thing that may cross:
 
 | Shape | Example |
 |---|---|
