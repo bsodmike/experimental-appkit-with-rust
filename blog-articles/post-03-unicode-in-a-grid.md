@@ -264,6 +264,6 @@ other program about exactly where the cell boundaries are.
 
 ---
 
-*Next in this series: the C boundary — four shapes that may cross, why a pointer
-into the grid is a bug you cannot write a lifetime for, and the header defect that
-a generator caught on its first run.*
+*Next in this series: [The C Boundary](post-04-the-c-boundary.md) — four shapes
+that may cross, why a pointer into the grid is a bug you cannot write a lifetime
+for, and the header defect that a generator caught on its first run.*
