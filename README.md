@@ -185,7 +185,7 @@ sides is what makes the instructions in this README work in either place.
 
 ```sh
 cd ~/workspace
-git clone <this-repo> crustty
+git clone https://github.com/bsodmike/experimental-appkit-with-rust.git crustty
 ```
 
 It is then `~/workspace/crustty` on the Mac and `/workspace/crustty` in the

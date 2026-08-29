@@ -274,7 +274,8 @@ before writing the thing, and most of the difficulty never arrives.**
 
 ---
 
-*That is the series. The code is on [GitHub](https://github.com/); the design
-documents that these articles are drawn from — the PRDs and the architecture
-decision records — are in the repository alongside it, and they are considerably
-more pedantic than the articles.*
+*That is the series. The code is at
+[bsodmike/experimental-appkit-with-rust](https://github.com/bsodmike/experimental-appkit-with-rust),
+and the design documents these articles are drawn from — the PRDs and the
+architecture decision records — sit in the repository alongside it. They are
+considerably more pedantic than the articles.*
