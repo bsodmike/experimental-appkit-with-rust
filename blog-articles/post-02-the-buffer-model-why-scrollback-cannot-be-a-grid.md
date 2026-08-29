@@ -356,6 +356,6 @@ this, the data structure is the design. The algorithms are what is left over.
 
 ---
 
-*Next in this series: Unicode in a grid — grapheme clusters, double-width
-characters, and why the engine refuses to let a wide character share a run with
-its neighbours.*
+*Next in this series: [Unicode in a Grid](post-03-unicode-in-a-grid.md) —
+grapheme clusters, double-width characters, and why the engine refuses to let a
+wide character share a run with its neighbours.*
