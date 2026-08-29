@@ -241,5 +241,7 @@ one glance at where the cursor was sitting.
 
 ---
 
-*Next in this series: threading — one lock, a coalesced wake-up, and a shutdown
-sequence that cannot leave a thread writing into memory that has gone.*
+*Next in this series:
+[Two Threads and a Flag](post-06-two-threads-and-a-flag.md) — one lock, a
+coalesced wake-up, and a shutdown sequence that cannot leave a thread writing
+into memory that has gone.*
