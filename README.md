@@ -118,6 +118,129 @@ blog-articles            long-form write-ups of the design
 logs                     where a traced run writes; gitignored
 ```
 
+## Developing with Claude Code in a container
+
+This project was built with [Claude Code](https://github.com/anthropics/claude-code)
+running inside a devcontainer, and the arrangement is worth reproducing if you
+want to work the same way: **the container has no Xcode and no AppKit, and that
+is the point.** Everything Claude can build is everything that does not need a
+Mac — which, by design, is most of this repository.
+
+The two sides share one directory through a bind mount, so nothing is ever
+copied, pushed or pulled between them. You edit and test in the container; you
+build and run the app on the host; both are looking at the same files.
+
+```
+   ┌──────────────────────────────────────────────────────────────┐
+   │  macOS host, Apple Silicon                                   │
+   │                                                              │
+   │    your terminal                                             │
+   │      just build      just run       just release             │
+   │      just test-mac   just xcode     just notarize            │
+   │                                                              │
+   │    Xcode, XcodeGen, codesign, the window server              │
+   │                                                              │
+   │    ~/workspace ──────────────┐                               │
+   └──────────────────────────────┼───────────────────────────────┘
+                                  │  bind mount
+                                  │  one directory, not a copy
+   ┌──────────────────────────────┼───────────────────────────────┐
+   │  devcontainer, linux/arm64   ▼                               │
+   │                          /workspace                          │
+   │                                                              │
+   │    Claude Code                                               │
+   │      cargo test      just test-glue     just smoke           │
+   │      just fmt        just lint                               │
+   │                                                              │
+   │    rustup, a C++ compiler. No Xcode, no AppKit, no Metal.    │
+   │    Network: an allowlist, not the internet.                  │
+   └──────────────────────────────────────────────────────────────┘
+```
+
+### Setting it up
+
+**1. Take the devcontainer from the Claude Code repository.**
+
+```sh
+git clone https://github.com/anthropics/claude-code.git
+mkdir -p ~/workspace
+cp -r claude-code/.devcontainer ~/workspace/
+```
+
+`~/workspace` is the folder you will open in VS Code. Anything inside it is
+visible to the container; anything outside it is not.
+
+**2. Check the mount targets `/workspace`.** In `.devcontainer/devcontainer.json`:
+
+```json
+"workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=delegated",
+"workspaceFolder": "/workspace"
+```
+
+`${localWorkspaceFolder}` is whichever folder you opened, so opening
+`~/workspace` puts it at `/workspace` inside. Keeping that path identical on both
+sides is what makes the instructions in this README work in either place.
+
+**3. Clone this repository underneath it.**
+
+```sh
+cd ~/workspace
+git clone <this-repo> crustty
+```
+
+It is then `~/workspace/crustty` on the Mac and `/workspace/crustty` in the
+container — the same directory, twice.
+
+**4. Open the folder in VS Code and choose "Reopen in Container".** On Apple
+Silicon the image builds natively for `arm64`; do not force `linux/amd64` unless
+you enjoy watching cargo run under emulation.
+
+**5. Install the Rust toolchain inside the container.** It is not in the image:
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+`sh.rustup.rs` and `static.rust-lang.org` are already in the firewall allowlist.
+If `cargo fetch` later hangs or fails to resolve, add `index.crates.io` and
+`static.crates.io` to the `for domain in ...` list in
+`.devcontainer/init-firewall.sh` and rebuild — the container's egress is an
+allowlist, so anything not named there is simply unreachable.
+
+**6. Bootstrap the host separately.** The Mac needs its own tools, and they are
+not shared with the container:
+
+```sh
+cd ~/workspace/crustty     # the same directory, from the host side
+just doctor
+just bootstrap
+```
+
+### Which side runs what
+
+| In the container | On the macOS host |
+|---|---|
+| `just test-rust` — the whole Rust workspace | `just build`, `just run`, `just watch` |
+| `just test-glue` — the frontend's platform-free core | `just test-mac` — the XCTest suite |
+| `just smoke` — the C boundary end to end | `just xcode` — breakpoints and Instruments |
+| `just fmt`, `just lint` | `just release`, `just dmg`, `just notarize` |
+
+The division is not arbitrary. `Glue/` is plain C++ with no AppKit precisely so
+that the frontend's decisions — key mapping, colour resolution, cell metrics, the
+frame protocol — can be tested on the Linux side. What is left for the Mac is the
+part that genuinely needs a screen.
+
+### Do not try to escape the box
+
+The container cannot build the app, and it should stay that way. Mounting the
+host's Xcode into it, or running Claude directly on the host to get at
+`xcodebuild`, gives up the isolation that makes the arrangement safe — an agent
+with a restricted network and no access to anything outside one directory.
+
+The friction is small and deliberate: when a change needs the app rebuilt, switch
+to your host terminal, `cd` to the same directory, and run `just run` there. The
+files are already saved, because there is only one copy of them.
+
 ## Setup
 
 ### Requirements
