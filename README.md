@@ -9,7 +9,7 @@ can be built and tested on a machine with no screen attached.
 
 ## Confessing my sins
 
-Father, I have committed grave sin, publicly for the very first time. I have used agentic models code an AppKit frontent and lean into the "harness" — (this emdash has been manually placed as an ironic pun) generating slop, that seems to work.
+Father, I have committed grave sin, publicly for the very first time. I have used agentic models code an AppKit frontend and lean into the "harness" — (this emdash has been manually placed as an ironic pun) generating slop, that seems to work.
 
 However, I have been a good boy and ensured the `terminal-core` rust crate isn't too ugly, although I have not spent as much time cleaning it up, as I normally would when working as an _artisanal rust coder_.
 

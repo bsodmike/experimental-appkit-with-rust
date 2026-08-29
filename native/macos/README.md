@@ -214,7 +214,7 @@ occasionally lag a new Xcode release.
 Three things, none of which matter until you distribute the app to another
 machine:
 
-1. **The bundle identifier is permanent.** `com.inertialbox.crustty` keys
+1. **The bundle identifier is permanent.** `com.crustyengineer.crustty` keys
    preferences, keychain items and permissions. Changing it after shipping
    orphans all three.
 2. **Signing.** Copy `Local.xcconfig.example` to `Local.xcconfig` and fill in a

@@ -5,7 +5,7 @@
 name: Crustty
 
 options:
-  bundleIdPrefix: com.inertialbox
+  bundleIdPrefix: com.crustyengineer
   deploymentTarget:
     macOS: "14.0"
   createIntermediateGroups: true
@@ -24,7 +24,7 @@ configFiles:
 settings:
   base:
     PRODUCT_NAME: Crustty
-    PRODUCT_BUNDLE_IDENTIFIER: com.inertialbox.crustty
+    PRODUCT_BUNDLE_IDENTIFIER: com.crustyengineer.crustty
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
 

@@ -388,10 +388,16 @@ needed.**
 - `just release-signed`, `just notarize` and `just dmg` are written and fail with
   a useful message until a certificate exists.
 
-**Decision: the bundle identifier is permanent from the first shipped build.** It
-keys preferences, keychain items and the TCC permission database; changing it
-later orphans all three. It is `com.inertialbox.crustty` until someone says
-otherwise, and the README says to say so before the first signed release.
+**Decision: the bundle identifier is `com.crustyengineer.crustty`, and it is
+permanent from the first shipped build.** It keys preferences, keychain items and
+the TCC permission database; changing it later orphans all three.
+
+It was briefly `com.inertialbox.crustty`, inferred from a git address because
+nothing better was known, and settled once a domain the project actually owns was
+on the table. That is the right form: reverse DNS under a domain you control, not
+a handle borrowed from somewhere else. Changing it cost two lines because nothing
+had shipped; after a signed build reaches another machine it costs every setting
+and permission that build was granted.
 
 **Decision: application state lives only in
 `~/Library/Application Support/<bundle-id>`**, resolved through `NSFileManager`
