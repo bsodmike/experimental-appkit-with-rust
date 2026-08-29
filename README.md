@@ -7,6 +7,14 @@ The engine has no idea macOS exists, and the frontend has no idea what a wrapped
 line is. That separation is the whole design, and it is why most of this project
 can be built and tested on a machine with no screen attached.
 
+## Confessing my sins
+
+Father, I have committed grave sin, publicly for the very first time. I have used agentic models code an AppKit frontent and lean into the "harness" — (this emdash has been manually placed as an ironic pun) generating slop, that seems to work.
+
+However, I have been a good boy and ensured the `terminal-core` rust crate isn't too ugly, although I have not spent as much time cleaning it up, as I normally would when working as an _artisanal rust coder_.
+
+I hope this will not affect my rust street-cred and since this slop has generated a working terminal, you will absolve me of my transgressions against the rust community.
+
 ## What it does today
 
 One window, one shell, drawing a real terminal: colours, wide characters,
@@ -231,14 +239,14 @@ module: `RUST_LOG=terminal-core::vt=info`.
 
 ## Documentation
 
-| | |
-|---|---|
-| [`docs/PRD.md`](docs/PRD.md) | The Rust half: the boundary, threading, the buffer model, and why each is what it is |
-| [`docs/PRD-mac.md`](docs/PRD-mac.md) | The native half: metrics, the draw path, event routing, distribution |
+|                                                              |                                                                                         |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------------------- |
+| [`docs/PRD.md`](docs/PRD.md)                                 | The Rust half: the boundary, threading, the buffer model, and why each is what it is    |
+| [`docs/PRD-mac.md`](docs/PRD-mac.md)                         | The native half: metrics, the draw path, event routing, distribution                    |
 | [`docs/PRD-mac-01-concepts.md`](docs/PRD-mac-01-concepts.md) | The macOS concepts those decisions rest on, for someone who has never written a Mac app |
-| [`docs/adrs/`](docs/adrs) | Architecture decision records, one per load-bearing choice |
-| [`native/macos/README.md`](native/macos/README.md) | Building, configuring and debugging the app |
-| [`blog-articles/`](blog-articles) | Long-form: what a TTY is, and how this one is put together |
+| [`docs/adrs/`](docs/adrs)                                    | Architecture decision records, one per load-bearing choice                              |
+| [`native/macos/README.md`](native/macos/README.md)           | Building, configuring and debugging the app                                             |
+| [`blog-articles/`](blog-articles)                            | Long-form: what a TTY is, and how this one is put together                              |
 
 ## License
 
