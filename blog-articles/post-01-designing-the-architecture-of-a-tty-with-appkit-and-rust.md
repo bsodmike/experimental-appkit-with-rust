@@ -499,5 +499,7 @@ The pixels are just the last, optional step.
 
 ---
 
-*Next in this series: the buffer model — why scrollback cannot be a grid of rows,
-and what happens to your text when you drag the window edge.*
+*Next in this series:
+[The Buffer Model](post-02-the-buffer-model-why-scrollback-cannot-be-a-grid.md) —
+why scrollback cannot be a grid of rows, and what happens to your text when you
+drag the window edge.*

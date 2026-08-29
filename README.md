@@ -369,7 +369,7 @@ module: `RUST_LOG=terminal-core::vt=info`.
 | [`docs/PRD-mac-01-concepts.md`](docs/PRD-mac-01-concepts.md) | The macOS concepts those decisions rest on, for someone who has never written a Mac app |
 | [`docs/adrs/`](docs/adrs)                                    | Architecture decision records, one per load-bearing choice                              |
 | [`native/macos/README.md`](native/macos/README.md)           | Building, configuring and debugging the app                                             |
-| [`blog-articles/`](blog-articles)                            | Long-form: what a TTY is, and how this one is put together                              |
+| [`blog-articles/`](blog-articles)                            | Long-form: what a TTY is, how this one is put together, and why its scrollback is not a grid |
 
 ## License
 
