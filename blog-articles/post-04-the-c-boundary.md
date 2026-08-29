@@ -283,6 +283,7 @@ the entire surface over which they can affect each other.
 
 ---
 
-*Next in this series: testing what you cannot compile — how most of a macOS
-frontend gets verified on Linux, and how a bug that only appeared on a Mac was
-reproduced in a container.*
+*Next in this series:
+[Testing What You Cannot Compile](post-05-testing-what-you-cannot-compile.md) —
+how most of a macOS frontend gets verified on Linux, and how a bug that only
+appeared on a Mac was reproduced in a container.*
