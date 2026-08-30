@@ -1,7 +1,9 @@
 [package]
 name = "terminal-core"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
 
 # The pure, headless terminal engine (PRD §2). No FFI and no platform code lives
 # here — that is a separate crate — so this one stays testable without a Mac.

@@ -2,6 +2,8 @@
 name = "terminal-pty"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
 
 # The pseudo-terminal and the child process on the far end of it. POSIX only,
 # and deliberately separate from `terminal-core` so the engine keeps no platform

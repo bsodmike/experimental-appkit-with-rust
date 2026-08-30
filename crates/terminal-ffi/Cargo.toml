@@ -2,6 +2,8 @@
 name = "terminal-ffi"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
 
 # The waist of the hourglass (PRD §2): the only crate that speaks C. It builds
 # as a staticlib for Xcode to link, and as an ordinary lib so the boundary can
